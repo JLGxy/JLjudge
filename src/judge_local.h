@@ -24,6 +24,8 @@
 #include <utility>
 #include <vector>
 
+#include "prog_option.h"
+
 #define FMT_ENFORCE_COMPILE_STRING 1
 
 #include "fmt/core.h"
@@ -36,6 +38,8 @@ using namespace std::literals;
 namespace chrono = std::chrono;
 
 using judge_time_duration = chrono::milliseconds;
+
+using po::_size_inf;
 
 class TestdirWrapper {
   public:
@@ -323,6 +327,7 @@ struct submission_set {
     bool contains_prob(std::string_view prob) const;
     bool contains(std::string_view user, std::string_view prob) const;
     void loads_from_args(int argc, char **argv);
+    void loads_from_args(const std::vector<std::string> &args);
 };
 
 inline bool path_contains(fs::path a, fs::path b) {

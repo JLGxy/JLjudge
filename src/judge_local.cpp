@@ -34,8 +34,8 @@
 #include "judge_core.h"
 #include "judge_logs.h"
 #include "prog_option.h"
-#include "xlsxwriter.h"
-#include "yaml-cpp/yaml.h"
+#include "xlsxwriter.h"     // IWYU pragma: keep
+#include "yaml-cpp/yaml.h"  // IWYU pragma: keep
 
 namespace jlgxy {
 
@@ -452,6 +452,30 @@ void submission_set::loads_from_args(int argc, char **argv) {
     } else {
         for (int i = 0; i < argc; i++) {
             std::string rs = argv[i];
+            auto m = rs.find('/');
+            if (m == std::string::npos) {
+                jl::prog.println(JLGXY_FMT("Invalid argument: \"{}\""), rs);
+                exit(1);
+            }
+            auto m2 = rs.find('/', m + 1);
+            if (m2 != std::string::npos) {
+                jl::prog.println(JLGXY_FMT("Invalid argument: \"{}\""), rs);
+                exit(1);
+            }
+            if (m == 0 || m + 1 == rs.length()) {
+                jl::prog.println(JLGXY_FMT("Invalid argument: \"{}\""), rs);
+                exit(1);
+            }
+            mp.emplace(rs.substr(0, m), rs.substr(m + 1));
+        }
+    }
+    init();
+}
+void submission_set::loads_from_args(const std::vector<std::string> &args) {
+    if (args.empty()) {
+        mp = {{"*", "*"}};
+    } else {
+        for (const auto &rs : args) {
             auto m = rs.find('/');
             if (m == std::string::npos) {
                 jl::prog.println(JLGXY_FMT("Invalid argument: \"{}\""), rs);
@@ -1286,6 +1310,54 @@ int CliRunner::run(int argc, char **argv) {
         exit(2);
     }
 }
+
+namespace cli {
+
+class Judge {
+  public:
+    constexpr static std::string_view _name = "judge";
+    constexpr static std::string_view _desc = "judge sources";
+    static po::Parser init_parser() {
+        po::Parser p;
+        p.add("add", 'a', "add submissions to judge", true, 0, _size_inf);
+        return p;
+    }
+    static int run(po::Parser &p) {
+        jlgxy::JudgeAll judgeall(fs::current_path() / "data", fs::current_path() / "sources",
+                                 fs::current_path() / ".jljudge" / "temp");
+        judgeall.load_compilers();
+        judgeall.subs.loads_from_args(p.get<std::vector<std::string>>("add"));
+        judgeall.judge_main();
+        return 0;
+    }
+};
+
+class CliHandler {
+  public:
+    int run(int argc, char **argv) {
+        try {
+            return run_throw(argc, argv);
+        } catch (std::exception &e) {
+            jl::prog.println(JLGXY_FMT("{}"), e.what());
+            exit(2);
+        }
+    }
+
+  private:
+    po::CommandHandler handler_;
+
+    int run_throw(int argc, char **argv) {
+        add<Judge>();
+        auto [name, ret] = handler_.parse(argc, argv);
+        return ret;
+    }
+
+    template <typename T>
+    void add() {
+        handler_.add_command(T::_name, T::init_parser(), T::_desc, T::run);
+    }
+};
+}  // namespace cli
 
 }  // namespace jlgxy
 

@@ -1,29 +1,58 @@
 #pragma once
 
 #include <algorithm>
+#include <exception>
+#include <functional>
 #include <iostream>
+#include <limits>
 #include <memory>
-#include <stdexcept>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
+#include "judge_logs.h"
+
 namespace jlgxy::po {
+
+constexpr auto _size_inf = std::numeric_limits<std::size_t>::max();
+
+class ArgNotFound : public std::exception {
+  public:
+    std::string what_str_;
+    explicit ArgNotFound(std::string_view s) : what_str_(s) {}
+    const char *what() const noexcept override { return what_str_.c_str(); }
+};
+class InvalidArg : public std::exception {
+  public:
+    std::string what_str_;
+    explicit InvalidArg(std::string_view s) : what_str_(s) {}
+    const char *what() const noexcept override { return what_str_.c_str(); }
+};
+class NotExist : public std::exception {
+  public:
+    std::string what_str_;
+    explicit NotExist(std::string_view s) : what_str_(s) {}
+    const char *what() const noexcept override { return what_str_.c_str(); }
+};
 
 class Parser {
   public:
-    void add_string(const std::string_view name, const char short_name,
-                    const std::string_view description, bool optional = true) {
-        opt_vector_.emplace_back(name, short_name, description, optional, false);
-    }
-    void add_bool(const std::string_view name, const char short_name,
-                  const std::string_view description, bool optional = true) {
-        opt_vector_.emplace_back(name, short_name, description, optional, true);
+    Parser() = default;
+    Parser(const Parser &) = delete;
+    Parser(Parser &&) noexcept = default;
+    Parser &operator=(const Parser &) = delete;
+    Parser &operator=(Parser &&) noexcept = default;
+
+    // `name` must be unique
+    void add(const std::string_view name, const char short_name, const std::string_view description,
+             bool optional, std::size_t min_arg, std::size_t max_arg) {
+        opt_vector_.emplace_back(name, short_name, description, optional, min_arg, max_arg);
     }
 
     template <typename T>
-    T get(std::string_view) = delete;
+    T get(std::string_view, const std::optional<T> & = std::nullopt) = delete;
 
     void show_usage() {
         std::cerr << "Usage:" << " ";
@@ -66,43 +95,72 @@ class Parser {
                 show_version();
             }
         }
+
+        auto add_or_merge = [](std::vector<std::pair<const option &, std::vector<std::string>>> &v,
+                               const option &opt, std::string_view s) {
+            auto it = std::find_if(
+                    v.begin(), v.end(),
+                    [&](const std::pair<const option &, std::vector<std::string>> &pr) {
+                        return std::addressof(pr.first) == std::addressof(opt);
+                    });
+            if (it != v.end()) {
+                it->second.emplace_back(s);
+            } else {
+                v.emplace_back(opt, std::vector{std::string{s}});
+            }
+        };
+        auto add_only = [](std::vector<std::pair<const option &, std::vector<std::string>>> &v,
+                           const option &opt) {
+            auto it = std::find_if(
+                    v.begin(), v.end(),
+                    [&](const std::pair<const option &, std::vector<std::string>> &pr) {
+                        return std::addressof(pr.first) == std::addressof(opt);
+                    });
+            if (it == v.end()) {
+                v.emplace_back(opt, std::vector<std::string>{});
+            }
+        };
+
         for (int i = 1; i < argc; i++) {
             auto &arg = argvec[i];
-            if (arg.empty()) throw std::runtime_error("empty argument is invalid");
-            if (arg[0] != '-') throw std::runtime_error("unexpected token");
-            if (arg.length() == 1) throw std::runtime_error("unexpected token");
+            if (arg.empty()) throw InvalidArg("empty argument is invalid");
+            if (arg[0] != '-') throw InvalidArg("unexpected token");
+            if (arg.length() == 1) throw InvalidArg("unexpected token");
             if (arg[1] != '-') {
                 const auto &opt = find_option_by_short_name(arg[1]);
                 if (arg.length() > 2) {
-                    args_.emplace_back(opt, arg.substr(2));
-                } else if (i < argc - 1 && (argvec[i + 1].empty() || argvec[i + 1][0] != '-')) {
-                    args_.emplace_back(opt, argvec[++i]);
+                    add_or_merge(args_, opt, arg.substr(2));
+                } else if (i + 1 < argc && (argvec[i + 1].empty() || argvec[i + 1][0] != '-')) {
+                    add_or_merge(args_, opt, argvec[++i]);
                 } else {
-                    args_.emplace_back(opt, "");
+                    add_only(args_, opt);
                 }
             } else {
-                if (arg.length() < 3) throw std::runtime_error("unexpected token");
+                if (arg.length() < 3) throw InvalidArg("unexpected token");
                 auto pos = arg.find('=');
                 if (pos == std::string::npos) pos = arg.length();
                 std::string_view namesv(arg.data() + 2, pos - 2);
                 const auto &opt = find_option_by_name(namesv);
                 if (pos != arg.length()) {
-                    args_.emplace_back(opt, arg.substr(pos + 1));
+                    add_or_merge(args_, opt, arg.substr(pos + 1));
                 } else {
-                    args_.emplace_back(opt, "");
+                    add_only(args_, opt);
                 }
             }
         }
         for (const auto &[opt, arg] : args_) {
-            if (opt.is_bool && !arg.empty()) throw std::runtime_error("unexpected token");
+            if (arg.size() < opt.min_cnt || arg.size() > opt.min_cnt)
+                throw InvalidArg(fmt::format(
+                        JLGXY_FMT("invalid number of argument for {}, expect [{},{}], got {}"),
+                        opt.name, opt.min_cnt, opt.max_cnt, arg.size()));
         }
         for (auto &opt : opt_vector_) {
             if (!opt.optional &&
                 std::find_if(args_.begin(), args_.end(),
-                             [&](const std::pair<const option &, std::string> &arg) {
+                             [&](const std::pair<const option &, std::vector<std::string>> &arg) {
                                  return std::addressof(arg.first) == std::addressof(opt);
                              }) == args_.end()) {
-                throw std::runtime_error("missing argument `" + opt.name + "`");
+                throw ArgNotFound("missing argument `" + opt.name + "`");
             }
         }
     }
@@ -119,65 +177,93 @@ class Parser {
         char short_name;
         std::string desc;
         bool optional;
-        bool is_bool;
+        std::size_t min_cnt, max_cnt;
         option(std::string_view lname, char sname, std::string_view descr, bool empty,
-               bool is_boolean)
+               std::size_t min_c, std::size_t max_c)
                 : name(lname),
                   short_name(sname),
                   desc(descr),
                   optional(empty),
-                  is_bool(is_boolean) {}
+                  min_cnt(min_c),
+                  max_cnt(max_c) {}
     };
 
     std::string name_str_, version_str_;
     std::vector<option> opt_vector_;
-    std::vector<std::pair<const option &, std::string>> args_;
+    std::vector<std::pair<const option &, std::vector<std::string>>> args_;
 
-    const option &find_option_by_name(std::string_view s) {
+    const option &find_option_by_name(std::string_view s) const {
         auto it = std::find_if(opt_vector_.begin(), opt_vector_.end(),
                                [&](const option &opt) { return opt.name == s; });
-        if (it == opt_vector_.end())
-            throw std::runtime_error("invalid argument --" + std::string(s));
+        if (it == opt_vector_.end()) throw NotExist("no such argument: --" + std::string(s));
         return *it;
     }
 
-    const option &find_option_by_short_name(char s) {
+    const option &find_option_by_short_name(char s) const {
         auto it = std::find_if(opt_vector_.begin(), opt_vector_.end(),
                                [&](const option &opt) { return opt.short_name == s; });
-        if (it == opt_vector_.end())
-            throw std::runtime_error(std::string("invalid argument -") + s);
+        if (it == opt_vector_.end()) throw NotExist(std::string("no such argument: -") + s);
         return *it;
     }
 };
 
+// if such argument exists, return true, otherwise false.
 template <>
-inline bool Parser::get<bool>(std::string_view name) {
+inline bool Parser::get<bool>(std::string_view name, const std::optional<bool> &) {
     return std::any_of(args_.begin(), args_.end(),
-                       [&](const std::pair<const option &, std::string> &arg) -> bool {
+                       [&](const std::pair<const option &, std::vector<std::string>> &arg) -> bool {
                            return arg.first.name == name;
                        });
 }
 
+// find such argument and return in std::string. if there's no such argument, return `default_value`
+// if given or throw if not.
 template <>
-inline std::string Parser::get<std::string>(std::string_view name) {
-    auto it = std::find_if(args_.begin(), args_.end(),
-                           [&](const std::pair<const option &, std::string> &arg) -> bool {
-                               return arg.first.name == name;
-                           });
-    if (it == args_.end()) throw std::runtime_error("missing argument: " + std::string(name));
+inline std::string Parser::get<std::string>(std::string_view name,
+                                            const std::optional<std::string> &default_value) {
+    auto it = std::find_if(
+            args_.begin(), args_.end(),
+            [&](const std::pair<const option &, std::vector<std::string>> &arg) -> bool {
+                return arg.first.name == name;
+            });
+    if (it == args_.end()) {
+        if (default_value.has_value()) return default_value.value();
+        throw ArgNotFound("not found: " + std::string(name));
+    }
+    if (it->second.size() != 1)
+        throw InvalidArg(fmt::format(JLGXY_FMT("expected 1 argument for {}, got {}"), name,
+                                     it->second.size()));
+    return it->second.front();
+}
+
+// find such argument and return in std::vector<std::string>. if there's no such argument, return
+// `default_value` if given or throw if not.
+template <>
+inline std::vector<std::string> Parser::get<std::vector<std::string>>(
+        std::string_view name, const std::optional<std::vector<std::string>> &default_value) {
+    auto it = std::find_if(
+            args_.begin(), args_.end(),
+            [&](const std::pair<const option &, std::vector<std::string>> &arg) -> bool {
+                return arg.first.name == name;
+            });
+    if (it == args_.end()) {
+        if (default_value.has_value()) return default_value.value();
+        throw ArgNotFound("not found: " + std::string(name));
+    }
     return it->second;
 }
 
 class CommandHandler {
   public:
-    void add_command(const std::string_view cmd, Parser &parser, const std::string_view desc) {
-        cmd_vector_.emplace_back(std::string(cmd), parser, desc);
+    void add_command(const std::string_view cmd, Parser parser, const std::string_view desc,
+                     const std::function<int(po::Parser &)> &callback) {
+        cmd_vector_.emplace_back(std::string(cmd), std::move(parser), desc, callback);
     }
 
     void show_usage() const {
         std::cerr << "Usage: " << name_str_ << " [command] [options]" << std::endl;
         std::cerr << "Commands:" << std::endl;
-        for (const auto &[cmd, psr, desc] : cmd_vector_) {
+        for (const auto &[cmd, psr, desc, call] : cmd_vector_) {
             std::cerr << "  " << cmd << std::endl;
         }
         exit(1);
@@ -188,16 +274,16 @@ class CommandHandler {
         exit(1);
     }
 
-    std::string parse(int argc, char **argv) {
+    std::pair<std::string, int> parse(int argc, char **argv) {
         if (argc <= 1) show_usage();
         std::string_view tcmd = argv[1];
         auto it = std::find_if(cmd_vector_.begin(), cmd_vector_.end(),
                                [&](const subcmd &cmd) { return cmd.name == tcmd; });
         if (it == cmd_vector_.end()) {
-            throw std::runtime_error("unknown command `" + std::string{tcmd} + "`");
+            throw NotExist("unknown command `" + std::string{tcmd} + "`");
         }
         it->parser.parse_check(argc - 1, argv + 1);
-        return it->name;
+        return {it->name, it->call(it->parser)};
     }
 
     void set_name(std::string_view name, std::string_view version) {
@@ -208,10 +294,15 @@ class CommandHandler {
   private:
     struct subcmd {
         std::string name;
-        Parser &parser;
+        Parser parser;
         std::string desc;
-        subcmd(std::string_view name_, Parser &parser_, std::string_view descr_)
-                : name(name_), parser(parser_), desc(descr_) {}
+        std::function<int(po::Parser &)> call;
+        subcmd(std::string_view name_, Parser parser_, std::string_view descr_,
+               std::function<int(po::Parser &)> callback)
+                : name(name_),
+                  parser(std::move(parser_)),
+                  desc(descr_),
+                  call(std::move(callback)) {}
     };
     std::string name_str_, version_str_;
     std::vector<subcmd> cmd_vector_;
