@@ -1,12 +1,17 @@
 #pragma once
 
+#include <fcntl.h>
+#include <sys/file.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <cmath>
+#include <cstring>
 #include <ios>
 #include <iostream>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 
 #include "fmt/core.h"
@@ -22,12 +27,35 @@
 
 namespace jlgxy::jl {
 
+class FileLock {
+  public:
+    template <typename... Args>
+    explicit FileLock(int fd) : fd_(fd) {
+        if (flock(fd_, LOCK_EX) == -1) {
+            throw std::runtime_error(std::string{"failed to get lock "} + strerror(errno));
+        }
+    }
+    ~FileLock() { flock(fd_, LOCK_UN); }
+    auto get_fd() const -> int { return fd_; }
+
+  private:
+    const int fd_;
+};
+
 inline std::string data;
 
 class ProgressBar {
   public:
-    ProgressBar() = default;
-    ~ProgressBar() { finish(); }
+    ProgressBar() : main_pid_(getpid()) {
+        log_file_fd_ = openat(AT_FDCWD, "log.txt", O_WRONLY | O_APPEND | O_CREAT);
+        if (log_file_fd_ == -1) {
+            throw std::runtime_error(std::string{"failed to open file "} + strerror(errno));
+        }
+    }
+    ~ProgressBar() {
+        finish();
+        if (log_file_fd_ != -1) close(log_file_fd_);
+    }
 
     void init() {
         const std::lock_guard guard(lock_);
@@ -53,15 +81,18 @@ class ProgressBar {
         }
     }
 
-    template <typename... Args>
-    auto print(Args... args) -> void {
-        const std::lock_guard guard(lock_);
-        clearbar();
-        std::cout << fmt::format(std::forward<Args>(args)...);
-        printbar();
+    auto write_log_to_err(std::string_view s) -> void {
+        std::lock_guard guard(file_lock_);
+        FileLock f_lock(log_file_fd_);
+        ::write(log_file_fd_, s.data(), s.size());
     }
+
     template <typename... Args>
     auto println(Args... args) -> void {
+        if (getpid() != main_pid_) {
+            write_log_to_err(fmt::format(std::forward<Args>(args)...) + '\n');
+            return;
+        }
         const std::lock_guard guard(lock_);
         clearbar();
         std::cout << fmt::format(std::forward<Args>(args)...) << '\n';
@@ -71,6 +102,10 @@ class ProgressBar {
     template <typename T>
     [[deprecated("use println instead")]]
     auto operator<<(T &&x) -> ProgressBar & {
+        if (getpid() != main_pid_) {
+            write_log_to_err(x);
+            return *this;
+        }
         const std::lock_guard guard(lock_);
         clearbar();
         std::cout << std::forward<T>(x);
@@ -80,6 +115,9 @@ class ProgressBar {
 
     [[deprecated("use println instead")]]
     auto operator<<(std::ostream &(*pf)(std::ostream &)) -> ProgressBar & {
+        if (getpid() != main_pid_) {
+            return *this;
+        }
         const std::lock_guard guard(lock_);
         clearbar();
         std::cout << pf;
@@ -88,6 +126,10 @@ class ProgressBar {
     }
 
     auto setprogress(double prog) -> void {
+        if (getpid() != main_pid_) {
+            throw std::runtime_error("can't set progress in sub process");
+            return;
+        }
         const std::lock_guard guard(lock_);
         progress_ = prog;
         clearbar();
@@ -97,10 +139,12 @@ class ProgressBar {
   private:
     double progress_ = 0;
     bool init_ = false;
-    std::mutex lock_;
+    std::mutex lock_, file_lock_;
+    pid_t main_pid_;
+    int log_file_fd_{-1};
 
     auto printbar() const -> void {
-        if (!init_) return;
+        if (!init_ || getpid() != main_pid_) return;
 
         winsize sz;
         if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &sz) == -1) {
@@ -128,7 +172,7 @@ class ProgressBar {
         std::cout << std::flush;
     }
     auto clearbar() const -> void {
-        if (!init_) return;
+        if (!init_ || getpid() != main_pid_) return;
         std::cout << "\033[2K\r" << std::flush;
     }
 };

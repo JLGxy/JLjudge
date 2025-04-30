@@ -13,6 +13,7 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <iterator>
 #include <map>
@@ -51,14 +52,6 @@ TestdirWrapper::~TestdirWrapper() { fs::remove_all(pth_); }
 JudgeOne::JudgeOne(fs::path dd, fs::path td, std::string ss)
         : data_dir_(std::move(dd)), temp_dir_(std::move(td)), rstr_(std::move(ss)) {}
 
-std::string JudgeOne::get_name(const std::string_view username, const std::string_view probname,
-                               const std::string_view suf) const {
-    return std::string(username) + "_jlgxy_" +
-           std::to_string(
-                   std::hash<std::string>{}(std::string(username) + probname + rstr_ + suf)) +
-           "_compiled_" + probname + "_" + suf;
-}
-
 list_result_t JudgeOne::run(const fs::path &code_file, const conf_t &config) const {
     TestdirWrapper wr(temp_dir_ / randstr());
     fs::path test_dir = wr.getpath();
@@ -75,13 +68,13 @@ list_result_t JudgeOne::run(const fs::path &code_file, const conf_t &config) con
     fs::current_path(test_dir);
     Judger judge(temp_dir_, config);
     // judge.config_ = config;
-    fs::path compiled = temp_dir_ / get_name(user_name, prob_name);
+    fs::path compiled = temp_dir_ / get_name(user_name, prob_name, "", rstr_);
     fs::copy_file(compiled, "./jljudge_main");
     try {
-        fs::path checker_compiled = temp_dir_ / get_name("chk", prob_name, "chk");
+        fs::path checker_compiled = temp_dir_ / get_name("chk", prob_name, "chk", rstr_);
         fs::copy_file(checker_compiled, "./jljudge_checker");
         if (config.is_interactive) {
-            fs::path interactor_compiled = temp_dir_ / get_name("ina", prob_name, "ina");
+            fs::path interactor_compiled = temp_dir_ / get_name("ina", prob_name, "ina", rstr_);
             fs::copy_file(interactor_compiled, "./jljudge_interactor");
         }
     } catch (std::exception &e) {
@@ -554,6 +547,8 @@ void JudgeAll::load_compilers() {
 }
 
 void JudgeAll::judge_main() {
+    // redirect_err();
+
     const jl::ProgressBarWrapper progressbar;
     load_probs();
 
@@ -569,32 +564,36 @@ void JudgeAll::judge_main() {
     compile_all();
     // auto start_running = std::time(nullptr);
 
-    base_prop_ = 0.3;
-    cur_prop_ = 0.7;
-    tm_usage_t tot_run_time = 0, cur_run_time = 0;
+    tasks_.clear();
     for (const auto &user_entry : fs::directory_iterator(source_dir)) {
         if (!user_entry.is_directory()) continue;
-        const std::string username = user_entry.path().filename();
-        user_res_t user_res;
+        const std::string user_name = user_entry.path().filename();
         for (const auto &[prob_name, config] : probs) {
-            if (!subs.contains(username, prob_name)) continue;
+            if (!subs.contains(user_name, prob_name)) continue;
             auto [found_code, compc, code] = find_code_at(user_entry.path() / prob_name, config);
             if (found_code) {
-                tot_run_time += get_tot_judge_time(config);
+                tasks_.push_back(
+                        {user_entry.path(), user_name, prob_name, config, compc, std::move(code)});
             }
         }
     }
+
+    base_prop_ = 0.3;
+    cur_prop_ = 0.7;
+    tm_usage_t tot_run_time = 0, cur_run_time = 0;
+    for (const auto &t : tasks_) {
+        tot_run_time += get_tot_judge_time(t.config);
+    }
+    std::map<std::string, user_res_t> all_user_res;
     for (const auto &user_entry : fs::directory_iterator(source_dir)) {
         if (!user_entry.is_directory()) continue;
         const std::string username = user_entry.path().filename();
-        user_res_t user_res;
         for (const auto &[prob_name, config] : probs) {
             if (!subs.contains(username, prob_name)) continue;
-            jl::prog.println(JLGXY_FMT("testing -- {}::{}"), username, prob_name);
             auto [found_code, compc, code] = find_code_at(user_entry.path() / prob_name, config);
-            // fs::path code = user_entry.path() / prob_name / (prob_name + ".cpp");
-            fs::path exe = temp_dir / get_name(username, prob_name);
             if (found_code) {
+                user_res_t &user_res = all_user_res[username];
+                jl::prog.println(JLGXY_FMT("testing -- {}::{}"), username, prob_name);
                 std::size_t sz = fs::file_size(code);
                 sub_info_t sub;
                 sub.prob_name = prob_name;
@@ -602,6 +601,8 @@ void JudgeAll::judge_main() {
                 sub.code_len = sz;
                 sub.judge_time = chrono::system_clock::now();
                 sub.compiler = compc;
+
+                fs::path exe = temp_dir / get_name(username, prob_name, "", rstr_);
                 if (fs::is_regular_file(exe)) {
                     JudgeOne runs(data_dir / prob_name, temp_dir, rstr_);
                     list_result_t rs = runs.run(code, config);
@@ -616,7 +617,9 @@ void JudgeAll::judge_main() {
                 jl::prog.setprogress(prop_);
             }
         }
-        all_res.r.emplace_back(username, std::move(user_res));
+    }
+    for (auto &[user_name, user_res] : all_user_res) {
+        all_res.r.emplace_back(user_name, std::move(user_res));
     }
     merge_user();
     calc_all_score();
@@ -672,6 +675,7 @@ void JudgeAll::load_probs() {
         try {
             read_config(conf_file, config);
         } catch (std::exception &e) {
+            // rethrow
             throw ProblemConfigError(prob_name, e.what());
         }
         if (config.name != prob_name) {
@@ -713,17 +717,32 @@ std::pair<double, double> JudgeAll::calc_sd(const std::vector<double> &s) {
     return {mean, sd};
 }
 
-std::string JudgeAll::generate_bests(std::size_t best_cnt) const {
+prob_sub_vec JudgeAll::get_all_subs() const {
     auto prob_num = contest_config.prob_id.size();
-    std::vector<std::vector<const sub_info_t *>> ac_subs(prob_num);
+    prob_sub_vec all_subs(prob_num);
     for (const auto &[user_name, user_res] : all_res.r) {
         for (const auto &sub : user_res.subs) {
             auto prob_idx = contest_config.prob_id.at(sub.prob_name);
-            if (sub.result.sco.final_verdict == verdict_t::_ac) {
-                ac_subs[prob_idx].emplace_back(&sub);
-            }
+            all_subs[prob_idx].emplace_back(&sub);
         }
     }
+    return all_subs;
+}
+
+prob_sub_vec JudgeAll::filter_sub(prob_sub_vec &&subs,
+                                  const std::function<bool(const sub_info_t &s)> &pred) {
+    std::for_each(subs.begin(), subs.end(), [&pred](std::vector<const sub_info_t *> &v) {
+        auto it = std::remove_if(v.begin(), v.end(),
+                                 [&pred](const sub_info_t *s) { return !pred(*s); });
+        v.erase(it, v.end());
+    });
+    return subs;
+}
+
+std::string JudgeAll::generate_bests(std::size_t best_cnt) const {
+    auto prob_num = contest_config.prob_id.size();
+    auto ac_subs = filter_sub(get_all_subs(), is_ac_sub);
+
     std::string html = std::string(_stat_template_begin);
     for (std::size_t i = 0; i < prob_num; i++) {
         std::sort(ac_subs[i].begin(), ac_subs[i].end(),
@@ -753,6 +772,7 @@ void JudgeAll::export_bests(std::size_t best_cnt) const {
 }
 
 void JudgeAll::export_stats(std::size_t best_cnt) const {
+    auto ac_subs = filter_sub(get_all_subs(), is_ac_sub);
     std::vector<std::vector<tm_usage_t>> tms(contest_config.prob_id.size());
     std::vector<std::vector<mem_usage_t>> mems(contest_config.prob_id.size());
     std::vector<std::vector<double>> scores(contest_config.prob_id.size());
@@ -938,14 +958,6 @@ void JudgeAll::check_valid() const {
     }
 }
 
-std::string JudgeAll::get_name(const std::string_view username, const std::string_view probname,
-                               const std::string_view suf) const {
-    return std::string(username) + "_jlgxy_" +
-           std::to_string(
-                   std::hash<std::string>{}(std::string(username) + probname + rstr_ + suf)) +
-           "_compiled_" + probname + "_" + suf;
-}
-
 void JudgeAll::get_problem_compile_list() {
     tot_compile_task_ = 0;
     for (const auto &[prob_name, config] : probs) {
@@ -953,13 +965,14 @@ void JudgeAll::get_problem_compile_list() {
         fs::path prob_path = data_dir / prob_name;
         tot_compile_task_++;
         compile_list_.push({prob_path / (config.checker + ".cpp"),
-                            temp_dir / get_name("chk", prob_path.filename().string(), "chk"),
+                            temp_dir / get_name("chk", prob_path.filename().string(), "chk", rstr_),
                             config.checker_compiler});
         if (config.is_interactive) {
             tot_compile_task_++;
-            compile_list_.push({prob_path / (config.interactor + ".cpp"),
-                                temp_dir / get_name("ina", prob_path.filename().string(), "ina"),
-                                config.interactor_compiler});
+            compile_list_.push(
+                    {prob_path / (config.interactor + ".cpp"),
+                     temp_dir / get_name("ina", prob_path.filename().string(), "ina", rstr_),
+                     config.interactor_compiler});
         }
     }
 }
@@ -968,12 +981,12 @@ void JudgeAll::check_problem_compile_files() {
         if (!subs.contains_prob(prob_name)) continue;
         fs::path prob_path = data_dir / prob_name;
         if (!fs::is_regular_file(temp_dir /
-                                 get_name("chk", prob_path.filename().string(), "chk"))) {
+                                 get_name("chk", prob_path.filename().string(), "chk", rstr_))) {
             throw ProblemConfigError(prob_name, "falied to compile checker");
         }
         if (config.is_interactive) {
-            if (!fs::is_regular_file(temp_dir /
-                                     get_name("ina", prob_path.filename().string(), "ina"))) {
+            if (!fs::is_regular_file(
+                        temp_dir / get_name("ina", prob_path.filename().string(), "ina", rstr_))) {
                 throw ProblemConfigError(prob_name, "falied to compile interactor");
             }
         }
@@ -983,14 +996,15 @@ void JudgeAll::get_user_compile_list() {
     tot_compile_task_ = 0;
     for (const auto &user_entry : fs::directory_iterator(source_dir)) {
         if (!user_entry.is_directory()) continue;
-        std::string username = user_entry.path().filename();
+        const std::string username = user_entry.path().filename();
         for (const auto &[prob_name, config] : probs) {
             if (!subs.contains(username, prob_name)) continue;
             auto [found_code, compc, code] = find_code_at(user_entry.path() / prob_name, config);
             // fs::path code = user_entry.path() / prob_name / (prob_name + ".cpp");
             if (found_code) {
                 tot_compile_task_++;
-                compile_list_.push({code, temp_dir / get_name(username, prob_name), compc});
+                compile_list_.push(
+                        {code, temp_dir / get_name(username, prob_name, "", rstr_), compc});
             }
         }
     }
@@ -1306,6 +1320,7 @@ int CliRunner::run(int argc, char **argv) {
     try {
         return try_run(argc, argv);
     } catch (std::exception &e) {
+        jl::prog.finish();
         jl::prog.println(JLGXY_FMT("{}"), e.what());
         exit(2);
     }
@@ -1338,6 +1353,7 @@ class CliHandler {
         try {
             return run_throw(argc, argv);
         } catch (std::exception &e) {
+            jl::prog.finish();
             jl::prog.println(JLGXY_FMT("{}"), e.what());
             exit(2);
         }

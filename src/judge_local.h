@@ -73,14 +73,18 @@ class ProblemConfigError : public JudgeError {
     const char *what() const noexcept override { return what_str_.c_str(); }
 };
 
+inline std::string get_name(const std::string_view username, const std::string_view probname,
+                            const std::string_view suf, const std::string_view rstr) {
+    return std::string(username) + "_jlgxy_" +
+           std::to_string(std::hash<std::string>{}(std::string(username) + probname + rstr + suf)) +
+           "_compiled_" + probname + "_" + suf;
+}
+
 class JudgeOne {
   public:
     fs::path data_dir_, temp_dir_;
     const std::string rstr_;
     JudgeOne(fs::path dd, fs::path td, std::string ss);
-
-    std::string get_name(std::string_view username, std::string_view probname,
-                         std::string_view suf = "") const;
 
     list_result_t run(const fs::path &code_file, const conf_t &config) const;
 };
@@ -397,6 +401,10 @@ class MyProcess {
 
 tm_usage_t get_tot_judge_time(const conf_t &config);
 
+using prob_sub_vec = std::vector<std::vector<const sub_info_t *>>;
+
+inline bool is_ac_sub(const sub_info_t &s) { return s.result.sco.final_verdict == verdict_t::_ac; }
+
 class JudgeAll {
   public:
     fs::path data_dir, source_dir, temp_dir;
@@ -433,11 +441,20 @@ class JudgeAll {
 
   private:
     const std::string rstr_;
+    struct judge_task {
+        fs::path user_path;
+        std::string user_name;
+        std::string prob_name;
+        const conf_t &config;
+        const Compiler *compc;
+        fs::path code;
+    };
     struct compile_prog {
         fs::path src, exe;
         const Compiler *compiler;
     };
 
+    std::vector<judge_task> tasks_;
     std::queue<compile_prog> compile_list_;
     std::mutex compile_list_lock_;
     int tot_compile_task_ = 0;
@@ -451,8 +468,6 @@ class JudgeAll {
                                                                      const conf_t &config);
     void read_config(const fs::path &conf_file, conf_t &conf) const;
     void check_valid() const;
-    std::string get_name(std::string_view username, std::string_view probname,
-                         std::string_view suf = "") const;
 
     void get_problem_compile_list();
     void check_problem_compile_files();
@@ -464,6 +479,9 @@ class JudgeAll {
     void calc_all_score();
     bool exist_prob(std::string_view x) const;
 
+    std::vector<std::vector<const sub_info_t *>> get_all_subs() const;
+    static prob_sub_vec filter_sub(prob_sub_vec &&subs,
+                                   const std::function<bool(const sub_info_t &s)> &pred);
     std::string generate_bests(std::size_t best_cnt) const;
     std::string generate_ranklist() const;
     static std::string generate_submission_info(const sub_info_t &sub, const conf_t &conf,

@@ -320,9 +320,9 @@ verdict_t ProgramWrapper::compile(const Compiler &compc, const fs::path &tempdir
         if (ppid == 0) {
             jl::prog.println(JLGXY_FMT("compiling: {}"), source_);
             int fdout = openat(AT_FDCWD, outfn.c_str(), O_CREAT | O_WRONLY,
-                               S_IRUSR | S_IRGRP | S_IROTH);
+                               S_IRWXU | S_IRGRP | S_IROTH);
             int fderr = openat(AT_FDCWD, errfn.c_str(), O_CREAT | O_WRONLY,
-                               S_IRUSR | S_IRGRP | S_IROTH);
+                               S_IRWXU | S_IRGRP | S_IROTH);
             if (dup2(fdout, STDOUT_FILENO) == -1) {
                 jl::prog.println(JLGXY_FMT("Failed to redirect out"));
                 exit(10);
@@ -418,9 +418,13 @@ void ProgramWrapper::configure_seccomp() {
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_getitimer, 0, 1),
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_getpid, 0, 1),
+            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_exit, 0, 1),
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_uname, 0, 1),
+            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_flock, 0, 1),
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_readlink, 0, 1),
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
@@ -429,6 +433,8 @@ void ProgramWrapper::configure_seccomp() {
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_getrlimit, 0, 1),
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_getrusage, 0, 1),
+            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_getppid, 0, 1),
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_arch_prctl, 0, 1),
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
@@ -640,7 +646,7 @@ int TracerOld::tracerwork(int pid, tm_usage_t time_lim, mem_usage_t mem_lim, rus
         // kill
         long orig_rax = ptrace(PTRACE_PEEKUSER, pid, 8 * ORIG_RAX, nullptr);
 #ifdef JLGXY_SHOWSYSCALLS
-        jl::prog.println(JLGXY_FMT(pid << " called: {}"), orig_rax);
+        jl::prog.println(JLGXY_FMT("{} called: {}"), pid, orig_rax);
 #endif
         if (is_dangerous_syscall(orig_rax, pid)) {
             jl::prog.println(JLGXY_FMT("Dangerous syscall: {}"), orig_rax);
