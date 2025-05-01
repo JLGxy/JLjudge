@@ -96,26 +96,23 @@ class Parser {
             }
         }
 
-        auto add_or_merge = [](std::vector<std::pair<const option &, std::vector<std::string>>> &v,
-                               const option &opt, std::string_view s) {
-            auto it = std::find_if(
-                    v.begin(), v.end(),
-                    [&](const std::pair<const option &, std::vector<std::string>> &pr) {
-                        return std::addressof(pr.first) == std::addressof(opt);
-                    });
+        auto find_opt = [](std::vector<option_value> &v, const option &opt) {
+            auto it = std::find_if(v.begin(), v.end(), [&](const option_value &pr) {
+                return std::addressof(pr.first) == std::addressof(opt);
+            });
+            return it;
+        };
+        auto add_or_merge = [&find_opt](std::vector<option_value> &v, const option &opt,
+                                        std::string_view s) {
+            auto it = find_opt(v, opt);
             if (it != v.end()) {
                 it->second.emplace_back(s);
             } else {
                 v.emplace_back(opt, std::vector{std::string{s}});
             }
         };
-        auto add_only = [](std::vector<std::pair<const option &, std::vector<std::string>>> &v,
-                           const option &opt) {
-            auto it = std::find_if(
-                    v.begin(), v.end(),
-                    [&](const std::pair<const option &, std::vector<std::string>> &pr) {
-                        return std::addressof(pr.first) == std::addressof(opt);
-                    });
+        auto add_only = [&find_opt](std::vector<option_value> &v, const option &opt) {
+            auto it = find_opt(v, opt);
             if (it == v.end()) {
                 v.emplace_back(opt, std::vector<std::string>{});
             }
@@ -156,10 +153,9 @@ class Parser {
         }
         for (auto &opt : opt_vector_) {
             if (!opt.optional &&
-                std::find_if(args_.begin(), args_.end(),
-                             [&](const std::pair<const option &, std::vector<std::string>> &arg) {
-                                 return std::addressof(arg.first) == std::addressof(opt);
-                             }) == args_.end()) {
+                std::find_if(args_.begin(), args_.end(), [&](const option_value &arg) {
+                    return std::addressof(arg.first) == std::addressof(opt);
+                }) == args_.end()) {
                 throw ArgNotFound("missing argument `" + opt.name + "`");
             }
         }
@@ -188,9 +184,11 @@ class Parser {
                   max_cnt(max_c) {}
     };
 
+    using option_value = std::pair<const option &, std::vector<std::string>>;
+
     std::string name_str_, version_str_;
     std::vector<option> opt_vector_;
-    std::vector<std::pair<const option &, std::vector<std::string>>> args_;
+    std::vector<option_value> args_;
 
     const option &find_option_by_name(std::string_view s) const {
         auto it = std::find_if(opt_vector_.begin(), opt_vector_.end(),
@@ -205,15 +203,22 @@ class Parser {
         if (it == opt_vector_.end()) throw NotExist(std::string("no such argument: -") + s);
         return *it;
     }
+    const option_value &get_value_by_name(std::string_view name) {
+        auto it = std::find_if(args_.begin(), args_.end(), [&](const option_value &arg) -> bool {
+            return arg.first.name == name;
+        });
+        if (it == args_.end()) {
+            throw ArgNotFound("not found: " + std::string(name));
+        }
+        return *it;
+    }
 };
 
 // if such argument exists, return true, otherwise false.
 template <>
 inline bool Parser::get<bool>(std::string_view name, const std::optional<bool> &) {
     return std::any_of(args_.begin(), args_.end(),
-                       [&](const std::pair<const option &, std::vector<std::string>> &arg) -> bool {
-                           return arg.first.name == name;
-                       });
+                       [&](const option_value &arg) -> bool { return arg.first.name == name; });
 }
 
 // find such argument and return in std::string. if there's no such argument, return `default_value`
@@ -221,19 +226,16 @@ inline bool Parser::get<bool>(std::string_view name, const std::optional<bool> &
 template <>
 inline std::string Parser::get<std::string>(std::string_view name,
                                             const std::optional<std::string> &default_value) {
-    auto it = std::find_if(
-            args_.begin(), args_.end(),
-            [&](const std::pair<const option &, std::vector<std::string>> &arg) -> bool {
-                return arg.first.name == name;
-            });
-    if (it == args_.end()) {
+    try {
+        const auto &val = get_value_by_name(name);
+        if (val.second.size() != 1)
+            throw InvalidArg(fmt::format(JLGXY_FMT("expected 1 argument for {}, got {}"), name,
+                                         val.second.size()));
+        return val.second.front();
+    } catch (ArgNotFound &e) {
         if (default_value.has_value()) return default_value.value();
-        throw ArgNotFound("not found: " + std::string(name));
+        throw e;
     }
-    if (it->second.size() != 1)
-        throw InvalidArg(fmt::format(JLGXY_FMT("expected 1 argument for {}, got {}"), name,
-                                     it->second.size()));
-    return it->second.front();
 }
 
 // find such argument and return in std::vector<std::string>. if there's no such argument, return
@@ -241,16 +243,13 @@ inline std::string Parser::get<std::string>(std::string_view name,
 template <>
 inline std::vector<std::string> Parser::get<std::vector<std::string>>(
         std::string_view name, const std::optional<std::vector<std::string>> &default_value) {
-    auto it = std::find_if(
-            args_.begin(), args_.end(),
-            [&](const std::pair<const option &, std::vector<std::string>> &arg) -> bool {
-                return arg.first.name == name;
-            });
-    if (it == args_.end()) {
+    try {
+        const auto &val = get_value_by_name(name);
+        return val.second;
+    } catch (ArgNotFound &e) {
         if (default_value.has_value()) return default_value.value();
-        throw ArgNotFound("not found: " + std::string(name));
+        throw e;
     }
-    return it->second;
 }
 
 class CommandHandler {
