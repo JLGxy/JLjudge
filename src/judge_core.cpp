@@ -211,27 +211,17 @@ tm_usage_t list_result_t::get_total_tm() const {
     return tot_tm;
 }
 
-MyPipe::MyPipe() {
-    if (pipe(fd_) == -1) closed_[0] = closed_[1] = true;
-}
-void MyPipe::close(int p) {
-    if (!closed_[p]) ::close(fd_[p]), closed_[p] = true;
-}
-void MyPipe::close() {
-    close(0);
-    close(1);
-}
-MyPipe::~MyPipe() { close(); }
-
 // Returns the number written, or -1
-::ssize_t MyPipe::write(const std::string_view s) { return ::write(fd_[1], s.data(), s.size()); }
+::ssize_t MyPipe::write(const std::string_view s) const {
+    return ::write(write_fd(), s.data(), s.size());
+}
 // Returns the number read, or -1
-::ssize_t MyPipe::read(std::string &s) {
+::ssize_t MyPipe::read(std::string &s) const {
     std::stringstream fout;
     std::vector<char> out_buf(1 << 26);
     ::ssize_t tot = 0;
     while (true) {
-        ::ssize_t t = ::read(fd_[0], out_buf.data(), out_buf.size());
+        ::ssize_t t = ::read(read_fd(), out_buf.data(), out_buf.size());
         if (t == -1) return -1;
         if (t == 0) break;
         fout.write(out_buf.data(), t);
@@ -318,24 +308,20 @@ void ProgramWrapper::signal_handler(int) {
     jl::prog.println(JLGXY_FMT("compiler timeout"));
     kill(compiler_pid_, SIGKILL);
 }
+void ProgramWrapper::realtimer(tm_usage_t time_ms) {
+    itimerval tm;
+    tm.it_value.tv_sec = time_ms / 1000;
+    tm.it_value.tv_usec = time_ms % 1000 * 1000;
+    tm.it_interval.tv_sec = 0;
+    tm.it_interval.tv_usec = 0;
+    setitimer(ITIMER_REAL, &tm, nullptr);
+}
 void ProgramWrapper::settimer(int pid) {
     compiler_pid_ = pid;
     signal(SIGALRM, signal_handler);
-    itimerval tm;
-    tm.it_value.tv_sec = _max_compile_time / 1000;
-    tm.it_value.tv_usec = _max_compile_time % 1000 * 1000;
-    tm.it_interval.tv_sec = 0;
-    tm.it_interval.tv_usec = 0;
-    setitimer(ITIMER_REAL, &tm, nullptr);
+    realtimer(_max_compile_time);
 }
-void ProgramWrapper::clrtimer() {
-    itimerval tm;
-    tm.it_value.tv_sec = 0;
-    tm.it_value.tv_usec = 0;
-    tm.it_interval.tv_sec = 0;
-    tm.it_interval.tv_usec = 0;
-    setitimer(ITIMER_REAL, &tm, nullptr);
-}
+void ProgramWrapper::clrtimer() { realtimer(0); }
 
 namespace {
 
@@ -353,6 +339,21 @@ void set_mem_lim(mem_usage_t mem_lim) {
     rlim.rlim_max = static_cast<rlim_t>(mem_lim);
     setrlimit(RLIMIT_DATA, &rlim);
     setrlimit(RLIMIT_STACK, &rlim);
+}
+
+void redirect_or_exit(int in, int out, int err, int fail_status = 4) {
+    if (in != -1 && dup2(in, STDIN_FILENO) == -1) {
+        jl::prog.println(JLGXY_FMT("Failed to redirect"));
+        exit(fail_status);
+    }
+    if (out != -1 && dup2(out, STDOUT_FILENO) == -1) {
+        jl::prog.println(JLGXY_FMT("Failed to redirect"));
+        exit(fail_status);
+    }
+    if (err != -1 && dup2(err, STDERR_FILENO) == -1) {
+        jl::prog.println(JLGXY_FMT("Failed to redirect"));
+        exit(fail_status);
+    }
 }
 
 }  // namespace
@@ -548,18 +549,7 @@ void ProgramWrapper::configure_seccomp() {
 
 void ProgramWrapper::startexe(int in, int out, int err, tm_usage_t /* time_lim */,
                               mem_usage_t mem_lim, const std::vector<std::string> &args) const {
-    if (dup2(out, STDOUT_FILENO) == -1) {
-        jl::prog.println(JLGXY_FMT("Failed to redirect"));
-        exit(1);
-    }
-    if (dup2(in, STDIN_FILENO) == -1) {
-        jl::prog.println(JLGXY_FMT("Failed to redirect"));
-        exit(1);
-    }
-    if (dup2(err, STDERR_FILENO) == -1) {
-        jl::prog.println(JLGXY_FMT("Failed to redirect"));
-        exit(1);
-    }
+    redirect_or_exit(in, out, err);
 
     std::vector<char *> argv;
     argv.emplace_back(const_cast<char *>(executable_.c_str()));
@@ -870,7 +860,7 @@ result_t UnsafeCodeRunner::run(int /* id */, const std::string &in_data, std::st
                                tm_usage_t time_lim, mem_usage_t mem_lim,
                                const std::vector<std::string> &args) {
     MyPipe outp, inp, resp;
-    if (outp.closed_[0] || inp.closed_[0] || resp.closed_[0]) {
+    if (outp.is_read_closed() || inp.is_read_closed() || resp.is_read_closed()) {
         jl::prog.println(JLGXY_FMT("Error creating pipe"));
         return _failed_r;
     }
@@ -883,46 +873,46 @@ result_t UnsafeCodeRunner::run(int /* id */, const std::string &in_data, std::st
     if (sid == 0) {
         // tracee process
 
-        outp.close(0);
-        inp.close(1);
+        outp.close_read();
+        inp.close_write();
         resp.close();
         int nfd = open("/dev/null", O_WRONLY);
         if (nfd == -1) {
             jl::prog.println(JLGXY_FMT("Failed to open /dev/null"));
             exit(1);
         }
-        prog_.startexe(inp.fd_[0], outp.fd_[1], nfd, time_lim, mem_lim, args);
+        prog_.startexe(inp.read_fd(), outp.write_fd(), nfd, time_lim, mem_lim, args);
     } else if (sid == 1) {
         // redirects the tracee's stdin/stdout
         // read the data from tracee's stdout from `outp`, and send to
         // the tracer through `resp`
 
         signal(SIGPIPE, SIG_IGN);
-        outp.close(1);
-        inp.close(0);
-        resp.close(0);
+        outp.close_write();
+        inp.close_read();
+        resp.close_read();
         if (inp.write(in_data) == -1) {
             jl::prog.println(JLGXY_FMT("Error writing input data"));
             exit(1);
         }
-        inp.close(1);
+        inp.close_write();
         if (outp.read(out_data) == -1) {
             jl::prog.println(JLGXY_FMT("Error while reading output"));
             exit(1);
         }
-        outp.close(0);
+        outp.close_read();
         if (resp.write(out_data) == -1) {
             jl::prog.println(JLGXY_FMT("Error transfering output data"));
             exit(1);
         }
-        resp.close(1);
+        resp.close_write();
         exit(0);
     } else {
         // tracer process
 
         outp.close();
         inp.close();
-        resp.close(1);
+        resp.close_write();
 
         rusage usage;
         int status = tracer.tracerwork(pid[0], time_lim, mem_lim, usage);
@@ -934,7 +924,7 @@ result_t UnsafeCodeRunner::run(int /* id */, const std::string &in_data, std::st
             jl::prog.println(JLGXY_FMT("Error while reading output"));
             return _failed_r;
         }
-        resp.close(0);
+        resp.close_read();
 
         int status2 = 0;
         waitpid(pid[1], &status2, 0);  // the second subprocess
@@ -978,7 +968,7 @@ result_t UnsafeCodeRunner::run(int /* id */, const std::string &in_data, std::st
 result_t UnsafeCodeRunner::run_interactive(int /* id */, tm_usage_t time_lim, mem_usage_t mem_lim) {
     tracer.iscalling_ = false;
     MyPipe outp, inp;
-    if (outp.closed_[0] || inp.closed_[0]) {
+    if (outp.is_read_closed() || inp.is_read_closed()) {
         jl::prog.println(JLGXY_FMT("Error creating pipe"));
         return _failed_r;
     }
@@ -992,14 +982,14 @@ result_t UnsafeCodeRunner::run_interactive(int /* id */, tm_usage_t time_lim, me
         // tracee process 1
 
         signal(SIGPIPE, SIG_IGN);
-        outp.close(0);
-        inp.close(1);
+        outp.close_read();
+        inp.close_write();
         int nfd = open("/dev/null", O_WRONLY);
         if (nfd == -1) {
             jl::prog.println(JLGXY_FMT("Failed to open /dev/null"));
             exit(1);
         }
-        prog_.startexe(inp.fd_[0], outp.fd_[1], nfd, time_lim, mem_lim, {});
+        prog_.startexe(inp.read_fd(), outp.write_fd(), nfd, time_lim, mem_lim, {});
     } else if (sid == 1) {
         int ppid[1];
         int ssid = myfork<1>(ppid);
@@ -1007,14 +997,14 @@ result_t UnsafeCodeRunner::run_interactive(int /* id */, tm_usage_t time_lim, me
             // tracee process 2
 
             signal(SIGPIPE, SIG_IGN);
-            outp.close(1);
-            inp.close(0);
+            outp.close_write();
+            inp.close_read();
             int nfd = open("/dev/null", O_WRONLY);
             if (nfd == -1) {
                 jl::prog.println(JLGXY_FMT("Failed to open /dev/null"));
                 exit(1);
             }
-            inter_prog_.startexe(outp.fd_[0], inp.fd_[1], nfd, time_lim, mem_lim, {});
+            inter_prog_.startexe(outp.read_fd(), inp.write_fd(), nfd, time_lim, mem_lim, {});
         } else {
             // tracer process 2
 

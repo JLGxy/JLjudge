@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <unistd.h>
 #ifndef __linux__
 #error "only linux is supported"
 #endif
@@ -204,17 +205,35 @@ inline void write_file(const fs::path &dst, const std::string_view s) { std::ofs
 
 class MyPipe {
   public:
-    int fd_[2]{};
-    bool closed_[2]{false, false};
-    MyPipe();
-    void close(int p);
-    void close();
-    ~MyPipe();
+    MyPipe() {
+        if (pipe(fd_) == -1) closed_[0] = closed_[1] = true;
+    }
+    void close_read() {
+        if (!closed_[0]) ::close(fd_[0]), closed_[0] = true;
+    }
+    void close_write() {
+        if (!closed_[1]) ::close(fd_[1]), closed_[1] = true;
+    }
+    void close() {
+        close_read();
+        close_write();
+    }
+    ~MyPipe() { close(); }
 
     // Returns the number written, or -1
-    ::ssize_t write(std::string_view s);
+    ::ssize_t write(std::string_view s) const;
     // Returns the number read, or -1
-    ::ssize_t read(std::string &s);
+    ::ssize_t read(std::string &s) const;
+
+    int read_fd() const { return fd_[0]; }
+    int write_fd() const { return fd_[1]; }
+
+    bool is_read_closed() const { return closed_[0]; }
+    bool is_write_closed() const { return closed_[1]; }
+
+  private:
+    int fd_[2]{};
+    bool closed_[2]{false, false};
 };
 
 // Create C subprocesses
@@ -281,6 +300,7 @@ class ProgramWrapper {
     std::string source_, executable_;
     static inline int compiler_pid_;
     static void signal_handler(int);
+    static void realtimer(tm_usage_t);
     static void settimer(int pid);
     static void clrtimer();
 
