@@ -25,8 +25,6 @@ add_rules("plugin.compile_commands.autoupdate", {outputdir = "build"})
 target("judgecli")
   set_kind("binary")
 
-  set_pcheader("include/zip.h")
-
   set_configdir("$(buildir)/generated")
   add_configfiles("src/config.h.in")
   add_includedirs("$(buildir)/generated")

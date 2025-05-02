@@ -244,6 +244,12 @@ inline std::vector<std::string> mysplit(const std::string_view s) {
     return ret;
 }
 
+void exec_vec(const std::string &name, const std::vector<std::string> &args)
+        __attribute__((noreturn));
+
+std::tuple<int, std::string, std::string> run_get_output(const std::string &name,
+                                                         const std::vector<std::string> &args);
+
 // TODO(JLGxy): test
 class Compiler {
   public:
@@ -251,6 +257,7 @@ class Compiler {
     std::string compiler;
     std::vector<std::string> argvec;
     std::vector<std::string> suffix;
+    std::vector<std::string> disallow_pragmas;
 
     Compiler() = default;
     Compiler(const Compiler &) = delete;
@@ -258,7 +265,12 @@ class Compiler {
     Compiler &operator=(const Compiler &) = delete;
     Compiler &operator=(Compiler &&) noexcept = default;
 
-    void compile(const fs::path &source, const fs::path &dest) const __attribute__((__noreturn__));
+    bool is_gcc_or_clang() const;
+    bool are_pragmas_valid() const;
+
+    void compile(const fs::path &source, const fs::path &dest,
+                 const std::vector<std::string> &additional_args) const
+            __attribute__((__noreturn__));
 
     bool validfile(const fs::path &pth) const;
 };
@@ -272,7 +284,9 @@ class ProgramWrapper {
     static void settimer(int pid);
     static void clrtimer();
 
-    verdict_t compile(const Compiler &compc, const fs::path &tempdir) const;
+    verdict_t check_pramgas(const Compiler &compc, const fs::path &tempdir) const;
+    verdict_t compile(const Compiler &compc, const fs::path &tempdir,
+                      const std::vector<std::string> &additional_args = {}) const;
     static void configure_seccomp();
 
     void startexe(int in, int out, int err, tm_usage_t /* time_lim */, mem_usage_t mem_lim,

@@ -27,10 +27,14 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <initializer_list>
+#include <iterator>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -252,18 +256,56 @@ int myfork(int pid[C]) {
     return sid;
 }
 
-void Compiler::compile(const fs::path &source, const fs::path &dest) const {
+void exec_vec(const std::string &name, const std::vector<std::string> &args) {
+    std::vector<char *> argv;
+    argv.reserve(args.size() + 2);
+    argv.emplace_back(const_cast<char *>(name.c_str()));
+    for (const auto &arg : args) argv.emplace_back(const_cast<char *>(arg.c_str()));
+    argv.emplace_back(nullptr);
+
+    execvp(name.c_str(), argv.data());
+    exit(-1);
+}
+
+std::tuple<int, std::string, std::string> run_get_output(const std::string &name,
+                                                         const std::vector<std::string> &args) {
+    int pid = fork();
+    if (pid == -1) {
+        return {-1, "", ""};
+    }
+    MyPipe out, err;
+    if (pid == 0) {
+        exec_vec(name, args);
+    } else {
+        auto read_to = [](MyPipe &p, std::string &s) { p.read(s); };
+        std::string out_data, err_data;
+        std::thread read_out(read_to, std::ref(out), std::ref(out_data));
+        std::thread read_err(read_to, std::ref(err), std::ref(err_data));
+        read_out.join();
+        read_err.join();
+        int status;
+        wait(&status);
+        return {status, out_data, err_data};
+    }
+}
+
+bool Compiler::is_gcc_or_clang() const {
+    auto [ret, out, err] = run_get_output(compiler, {"-v"});
+    if (ret != 0) return false;
+    if (err.find("gcc version") != std::string::npos) return true;
+    if (err.find("clang version") != std::string::npos) return true;
+    return false;
+}
+
+void Compiler::compile(const fs::path &source, const fs::path &dest,
+                       const std::vector<std::string> &additional_args) const {
     auto rarg = argvec;
     std::replace(rarg.begin(), rarg.end(), std::string("${source}"), source.string());
     std::replace(rarg.begin(), rarg.end(), std::string("${executable}"), dest.string());
-    std::vector<char *> argv;
-    argv.reserve(rarg.size() + 2);
-    argv.emplace_back(const_cast<char *>(compiler.c_str()));
-    for (const auto &arg : rarg) argv.emplace_back(const_cast<char *>(arg.c_str()));
-    argv.emplace_back(nullptr);
 
-    execvp(compiler.c_str(), argv.data());
-    exit(3);
+    std::copy(additional_args.begin(), additional_args.end(), std::back_inserter(rarg));
+
+    exec_vec(compiler, rarg);
 }
 
 bool Compiler::validfile(const fs::path &pth) const {
@@ -295,7 +337,41 @@ void ProgramWrapper::clrtimer() {
     setitimer(ITIMER_REAL, &tm, nullptr);
 }
 
-verdict_t ProgramWrapper::compile(const Compiler &compc, const fs::path &tempdir) const {
+namespace {
+
+void open_and_dup_log_file(const fs::path &log_file, int fd) {
+    int newfd = openat(AT_FDCWD, log_file.c_str(), O_CREAT | O_WRONLY, S_IRWXU | S_IRGRP | S_IROTH);
+    if (dup2(newfd, fd) == -1) {
+        jl::prog.println(JLGXY_FMT("Failed to redirect log"));
+        exit(10);
+    }
+}
+
+void set_mem_lim(mem_usage_t mem_lim) {
+    rlimit rlim;
+    rlim.rlim_cur = static_cast<rlim_t>(mem_lim);
+    rlim.rlim_max = static_cast<rlim_t>(mem_lim);
+    setrlimit(RLIMIT_DATA, &rlim);
+    setrlimit(RLIMIT_STACK, &rlim);
+}
+
+}  // namespace
+
+// TODO(JLGxy): implementation
+verdict_t ProgramWrapper::check_pramgas(const Compiler &compc, const fs::path &tempdir) const {
+    if (!compc.is_gcc_or_clang()) return verdict_t::_ac;
+    compile(compc, tempdir, {"-E"});
+    std::ifstream fin(executable_);
+
+    // TODO(JLGxy): impl
+
+    fin.close();
+    fs::remove(executable_);
+    return verdict_t::_ac;
+}
+
+verdict_t ProgramWrapper::compile(const Compiler &compc, const fs::path &tempdir,
+                                  const std::vector<std::string> &additional_args) const {
     int pid = fork();
     if (pid < 0) {
         jl::prog.println(JLGXY_FMT("Error while forking"));
@@ -319,25 +395,11 @@ verdict_t ProgramWrapper::compile(const Compiler &compc, const fs::path &tempdir
         }
         if (ppid == 0) {
             jl::prog.println(JLGXY_FMT("compiling: {}"), source_);
-            int fdout = openat(AT_FDCWD, outfn.c_str(), O_CREAT | O_WRONLY,
-                               S_IRWXU | S_IRGRP | S_IROTH);
-            int fderr = openat(AT_FDCWD, errfn.c_str(), O_CREAT | O_WRONLY,
-                               S_IRWXU | S_IRGRP | S_IROTH);
-            if (dup2(fdout, STDOUT_FILENO) == -1) {
-                jl::prog.println(JLGXY_FMT("Failed to redirect out"));
-                exit(10);
-            }
-            if (dup2(fderr, STDERR_FILENO) == -1) {
-                jl::prog.println(JLGXY_FMT("Failed to redirect err"));
-                exit(10);
-            }
-            rlimit rlim;
-            rlim.rlim_cur = static_cast<rlim_t>(2L << 30);
-            rlim.rlim_max = static_cast<rlim_t>(2L << 30);
-            setrlimit(RLIMIT_DATA, &rlim);
-            setrlimit(RLIMIT_STACK, &rlim);
+            open_and_dup_log_file(outfn, STDOUT_FILENO);
+            open_and_dup_log_file(errfn, STDERR_FILENO);
+            set_mem_lim(2L << 30);
 
-            compc.compile(source_, executable_);
+            compc.compile(source_, executable_, additional_args);
         } else {
             settimer(ppid);
             int status = 0;
@@ -506,11 +568,7 @@ void ProgramWrapper::startexe(int in, int out, int err, tm_usage_t /* time_lim *
     }
     argv.emplace_back(nullptr);
 
-    rlimit rlim;
-    rlim.rlim_cur = static_cast<rlim_t>((mem_lim << 9) * 3);  // 1.5 times
-    rlim.rlim_max = static_cast<rlim_t>((mem_lim << 9) * 3);
-    setrlimit(RLIMIT_DATA, &rlim);
-    setrlimit(RLIMIT_STACK, &rlim);
+    set_mem_lim((mem_lim << 9) * 3);
     // rlim.rlim_cur = time_lim/1000+1;
     // rlim.rlim_max = time_lim/1000+2;
     // setrlimit(RLIMIT_CPU, &rlim);

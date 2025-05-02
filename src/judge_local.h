@@ -473,6 +473,7 @@ class JudgeAll {
     void check_problem_compile_files();
     void get_user_compile_list();
 
+    void inc_compile_progress();
     static void compiles(JudgeAll &ja, const fs::path &temp_dir);
     void compile_all();
 

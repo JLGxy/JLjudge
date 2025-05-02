@@ -465,28 +465,10 @@ void submission_set::loads_from_args(int argc, char **argv) {
     init();
 }
 void submission_set::loads_from_args(const std::vector<std::string> &args) {
-    if (args.empty()) {
-        mp = {{"*", "*"}};
-    } else {
-        for (const auto &rs : args) {
-            auto m = rs.find('/');
-            if (m == std::string::npos) {
-                jl::prog.println(JLGXY_FMT("Invalid argument: \"{}\""), rs);
-                exit(1);
-            }
-            auto m2 = rs.find('/', m + 1);
-            if (m2 != std::string::npos) {
-                jl::prog.println(JLGXY_FMT("Invalid argument: \"{}\""), rs);
-                exit(1);
-            }
-            if (m == 0 || m + 1 == rs.length()) {
-                jl::prog.println(JLGXY_FMT("Invalid argument: \"{}\""), rs);
-                exit(1);
-            }
-            mp.emplace(rs.substr(0, m), rs.substr(m + 1));
-        }
-    }
-    init();
+    std::vector<char *> carg;
+    carg.reserve(args.size());
+    for (const auto &arg : args) carg.emplace_back(const_cast<char *>(arg.c_str()));
+    return loads_from_args(static_cast<int>(carg.size()), carg.data());
 }
 
 void print_problem_config_warning(const std::string_view name, const std::string_view what_arg) {
@@ -558,12 +540,6 @@ void JudgeAll::judge_main() {
     compile_all();
     check_problem_compile_files();
 
-    base_prop_ = 0.1;
-    cur_prop_ = 0.2;
-    get_user_compile_list();
-    compile_all();
-    // auto start_running = std::time(nullptr);
-
     tasks_.clear();
     for (const auto &user_entry : fs::directory_iterator(source_dir)) {
         if (!user_entry.is_directory()) continue;
@@ -578,6 +554,12 @@ void JudgeAll::judge_main() {
         }
     }
 
+    base_prop_ = 0.1;
+    cur_prop_ = 0.2;
+    get_user_compile_list();
+    compile_all();
+    // auto start_running = std::time(nullptr);
+
     base_prop_ = 0.3;
     cur_prop_ = 0.7;
     tm_usage_t tot_run_time = 0, cur_run_time = 0;
@@ -585,38 +567,30 @@ void JudgeAll::judge_main() {
         tot_run_time += get_tot_judge_time(t.config);
     }
     std::map<std::string, user_res_t> all_user_res;
-    for (const auto &user_entry : fs::directory_iterator(source_dir)) {
-        if (!user_entry.is_directory()) continue;
-        const std::string username = user_entry.path().filename();
-        for (const auto &[prob_name, config] : probs) {
-            if (!subs.contains(username, prob_name)) continue;
-            auto [found_code, compc, code] = find_code_at(user_entry.path() / prob_name, config);
-            if (found_code) {
-                user_res_t &user_res = all_user_res[username];
-                jl::prog.println(JLGXY_FMT("testing -- {}::{}"), username, prob_name);
-                std::size_t sz = fs::file_size(code);
-                sub_info_t sub;
-                sub.prob_name = prob_name;
-                sub.user_name = username;
-                sub.code_len = sz;
-                sub.judge_time = chrono::system_clock::now();
-                sub.compiler = compc;
+    for (const auto &t : tasks_) {
+        user_res_t &user_res = all_user_res[t.user_name];
+        jl::prog.println(JLGXY_FMT("testing -- {}::{}"), t.user_name, t.prob_name);
+        std::size_t sz = fs::file_size(t.code);
+        sub_info_t sub;
+        sub.prob_name = t.prob_name;
+        sub.user_name = t.user_name;
+        sub.code_len = sz;
+        sub.judge_time = chrono::system_clock::now();
+        sub.compiler = t.compc;
 
-                fs::path exe = temp_dir / get_name(username, prob_name, "", rstr_);
-                if (fs::is_regular_file(exe)) {
-                    JudgeOne runs(data_dir / prob_name, temp_dir, rstr_);
-                    list_result_t rs = runs.run(code, config);
-                    sub.result.list_res = std::move(rs);
-                } else {
-                    sub.result.list_res = list_result_t{_ce_r};
-                }
-                user_res.subs.emplace_back(std::move(sub));
-                cur_run_time += get_tot_judge_time(config);
-                prop_ = base_prop_ + cur_prop_ * static_cast<double>(cur_run_time) /
-                                             static_cast<double>(tot_run_time);
-                jl::prog.setprogress(prop_);
-            }
+        fs::path exe = temp_dir / get_name(t.user_name, t.prob_name, "", rstr_);
+        if (fs::is_regular_file(exe)) {
+            JudgeOne runs(data_dir / t.prob_name, temp_dir, rstr_);
+            list_result_t rs = runs.run(t.code, t.config);
+            sub.result.list_res = std::move(rs);
+        } else {
+            sub.result.list_res = list_result_t{_ce_r};
         }
+        user_res.subs.emplace_back(std::move(sub));
+        cur_run_time += get_tot_judge_time(t.config);
+        prop_ = base_prop_ +
+                cur_prop_ * static_cast<double>(cur_run_time) / static_cast<double>(tot_run_time);
+        jl::prog.setprogress(prop_);
     }
     for (auto &[user_name, user_res] : all_user_res) {
         all_res.r.emplace_back(user_name, std::move(user_res));
@@ -994,20 +968,18 @@ void JudgeAll::check_problem_compile_files() {
 }
 void JudgeAll::get_user_compile_list() {
     tot_compile_task_ = 0;
-    for (const auto &user_entry : fs::directory_iterator(source_dir)) {
-        if (!user_entry.is_directory()) continue;
-        const std::string username = user_entry.path().filename();
-        for (const auto &[prob_name, config] : probs) {
-            if (!subs.contains(username, prob_name)) continue;
-            auto [found_code, compc, code] = find_code_at(user_entry.path() / prob_name, config);
-            // fs::path code = user_entry.path() / prob_name / (prob_name + ".cpp");
-            if (found_code) {
-                tot_compile_task_++;
-                compile_list_.push(
-                        {code, temp_dir / get_name(username, prob_name, "", rstr_), compc});
-            }
-        }
+    for (const auto &t : tasks_) {
+        tot_compile_task_++;
+        compile_list_.push(
+                {t.code, temp_dir / get_name(t.user_name, t.prob_name, "", rstr_), t.compc});
     }
+}
+
+void JudgeAll::inc_compile_progress() {
+    std::lock_guard guard(compile_list_lock_);
+    tot_compiled_++;
+    prop_ = base_prop_ + cur_prop_ * tot_compiled_ / tot_compile_task_;
+    jl::prog.setprogress(prop_);
 }
 
 void JudgeAll::compiles(JudgeAll &ja, const fs::path &temp_dir) {
@@ -1022,12 +994,7 @@ void JudgeAll::compiles(JudgeAll &ja, const fs::path &temp_dir) {
             ja.compile_list_.pop();
         }
         compile_to(p.src, p.exe, *p.compiler, temp_dir);
-        {
-            std::lock_guard guard(ja.compile_list_lock_);
-            ja.tot_compiled_++;
-            ja.prop_ = ja.base_prop_ + ja.cur_prop_ * ja.tot_compiled_ / ja.tot_compile_task_;
-            jl::prog.setprogress(ja.prop_);
-        }
+        ja.inc_compile_progress();
     }
 }
 void JudgeAll::compile_all() {
