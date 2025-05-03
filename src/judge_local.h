@@ -364,41 +364,6 @@ inline std::string trans(const std::string_view s) {
 
 void print_problem_config_warning(std::string_view name, std::string_view what_arg);
 
-class MyProcess {
-  public:
-    pid_t proc_pid_;
-    MyProcess(const MyProcess &o) = delete;
-    MyProcess(MyProcess &&o) noexcept {
-        proc_pid_ = o.proc_pid_;
-        o.proc_pid_ = 0;
-    }
-    MyProcess &operator=(const MyProcess &o) = delete;
-    MyProcess &operator=(MyProcess &&o) noexcept {
-        proc_pid_ = o.proc_pid_;
-        o.proc_pid_ = 0;
-        return *this;
-    }
-    template <typename T, typename... Args>
-    explicit MyProcess(T x, Args... args) {
-        auto pid = fork();
-        if (pid == -1) {
-            throw std::runtime_error("error forking");
-        }
-        if (pid == 0) {
-            x(args...);
-            exit(0);
-        } else {
-            proc_pid_ = pid;
-        }
-    }
-    void join() const {
-        int status;
-        do {
-            waitpid(proc_pid_, &status, 0);
-        } while (!WIFEXITED(status) && !WIFSIGNALED(status));
-    }
-};
-
 tm_usage_t get_tot_judge_time(const conf_t &config);
 
 using prob_sub_vec = std::vector<std::vector<const sub_info_t *>>;

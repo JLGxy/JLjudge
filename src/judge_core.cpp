@@ -39,8 +39,11 @@
 #include <vector>
 
 #include "judge_logs.h"
+#include "multiprocess.h"
 
 namespace jlgxy {
+
+namespace mpc = multiproc;
 
 std::string verdict_to_str(verdict_t ver) {
     switch (ver) {
@@ -231,6 +234,41 @@ tm_usage_t list_result_t::get_total_tm() const {
     return tot;
 }
 
+namespace {
+
+void open_and_dup_log_file(const fs::path &log_file, int fd) {
+    int newfd = openat(AT_FDCWD, log_file.c_str(), O_CREAT | O_WRONLY, S_IRWXU | S_IRGRP | S_IROTH);
+    if (dup2(newfd, fd) == -1) {
+        jl::prog.println(JLGXY_FMT("Failed to redirect log"));
+        exit(10);
+    }
+}
+
+void set_mem_lim(mem_usage_t mem_lim) {
+    rlimit rlim;
+    rlim.rlim_cur = static_cast<rlim_t>(mem_lim);
+    rlim.rlim_max = static_cast<rlim_t>(mem_lim);
+    setrlimit(RLIMIT_DATA, &rlim);
+    setrlimit(RLIMIT_STACK, &rlim);
+}
+
+void redirect_or_exit(int in, int out, int err, int fail_status = 4) {
+    if (in != -1 && dup2(in, STDIN_FILENO) == -1) {
+        jl::prog.println(JLGXY_FMT("Failed to redirect"));
+        exit(fail_status);
+    }
+    if (out != -1 && dup2(out, STDOUT_FILENO) == -1) {
+        jl::prog.println(JLGXY_FMT("Failed to redirect"));
+        exit(fail_status);
+    }
+    if (err != -1 && dup2(err, STDERR_FILENO) == -1) {
+        jl::prog.println(JLGXY_FMT("Failed to redirect"));
+        exit(fail_status);
+    }
+}
+
+}  // namespace
+
 template <int C>
 int myfork(int pid[C]) {
     int sid;
@@ -259,24 +297,24 @@ void exec_vec(const std::string &name, const std::vector<std::string> &args) {
 
 std::tuple<int, std::string, std::string> run_get_output(const std::string &name,
                                                          const std::vector<std::string> &args) {
-    int pid = fork();
-    if (pid == -1) {
-        return {-1, "", ""};
-    }
     MyPipe out, err;
-    if (pid == 0) {
+    mpc::Process proc([&] {
+        out.close_read();
+        err.close_read();
+        int nfd = open("/dev/null", O_RDONLY);
+        redirect_or_exit(nfd, out.write_fd(), err.write_fd());
         exec_vec(name, args);
-    } else {
-        auto read_to = [](MyPipe &p, std::string &s) { p.read(s); };
-        std::string out_data, err_data;
-        std::thread read_out(read_to, std::ref(out), std::ref(out_data));
-        std::thread read_err(read_to, std::ref(err), std::ref(err_data));
-        read_out.join();
-        read_err.join();
-        int status;
-        wait(&status);
-        return {status, out_data, err_data};
-    }
+    });
+    out.close_write();
+    err.close_write();
+    auto read_to = [](MyPipe &p, std::string &s) { p.read(s); };
+    std::string out_data, err_data;
+    std::thread read_out(read_to, std::ref(out), std::ref(out_data));
+    std::thread read_err(read_to, std::ref(err), std::ref(err_data));
+    read_out.join();
+    read_err.join();
+    proc.join();
+    return {proc.if_exited() ? proc.exit_status() : -1, out_data, err_data};
 }
 
 bool Compiler::is_gcc_or_clang() const {
@@ -322,41 +360,6 @@ void ProgramWrapper::settimer(int pid) {
     realtimer(_max_compile_time);
 }
 void ProgramWrapper::clrtimer() { realtimer(0); }
-
-namespace {
-
-void open_and_dup_log_file(const fs::path &log_file, int fd) {
-    int newfd = openat(AT_FDCWD, log_file.c_str(), O_CREAT | O_WRONLY, S_IRWXU | S_IRGRP | S_IROTH);
-    if (dup2(newfd, fd) == -1) {
-        jl::prog.println(JLGXY_FMT("Failed to redirect log"));
-        exit(10);
-    }
-}
-
-void set_mem_lim(mem_usage_t mem_lim) {
-    rlimit rlim;
-    rlim.rlim_cur = static_cast<rlim_t>(mem_lim);
-    rlim.rlim_max = static_cast<rlim_t>(mem_lim);
-    setrlimit(RLIMIT_DATA, &rlim);
-    setrlimit(RLIMIT_STACK, &rlim);
-}
-
-void redirect_or_exit(int in, int out, int err, int fail_status = 4) {
-    if (in != -1 && dup2(in, STDIN_FILENO) == -1) {
-        jl::prog.println(JLGXY_FMT("Failed to redirect"));
-        exit(fail_status);
-    }
-    if (out != -1 && dup2(out, STDOUT_FILENO) == -1) {
-        jl::prog.println(JLGXY_FMT("Failed to redirect"));
-        exit(fail_status);
-    }
-    if (err != -1 && dup2(err, STDERR_FILENO) == -1) {
-        jl::prog.println(JLGXY_FMT("Failed to redirect"));
-        exit(fail_status);
-    }
-}
-
-}  // namespace
 
 // TODO(JLGxy): implementation
 verdict_t ProgramWrapper::check_pramgas(const Compiler &compc, const fs::path &tempdir) const {
@@ -438,107 +441,23 @@ verdict_t ProgramWrapper::compile(const Compiler &compc, const fs::path &tempdir
     return verdict_t::_ac;
 }
 void ProgramWrapper::configure_seccomp() {
-    struct sock_filter filter[] = {
+    std::vector<sock_filter> filt{
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_openat, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K,
-                     SECCOMP_RET_TRACE),  // trace openat syscall
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_execve, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K,
-                     SECCOMP_RET_TRACE),  // trace execve, only the first
-                                          // execve syscall is valid
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_read, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_write, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_close, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_fstat, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_poll, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_lseek, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_mmap, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_mprotect, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_munmap, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_brk, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_ioctl, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_pread64, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_pwrite64, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_dup, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_dup2, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_nanosleep, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_getitimer, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_getpid, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_exit, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_uname, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_flock, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_readlink, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_gettimeofday, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_getrlimit, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_getrusage, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_getppid, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_arch_prctl, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_time, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_futex, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_set_tid_address, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_timer_gettime, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_clock_gettime, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_clock_getres, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_clock_nanosleep, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_exit_group, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_newfstatat, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_readlinkat, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_set_robust_list, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_get_robust_list, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_dup3, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_prlimit64, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_getrandom, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_rseq, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL),
     };
 
+    auto add_rule = [&](unsigned nr, unsigned act) {
+        filt.push_back(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, nr, 0, 1));
+        filt.push_back(BPF_STMT(BPF_RET | BPF_K, act));
+    };
+    for (auto nr : _syscalls_traced) add_rule(nr, SECCOMP_RET_TRACE);
+    for (auto nr : _syscalls_allowed) add_rule(nr, SECCOMP_RET_ALLOW);
+    filt.push_back(BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL));
+
+    jl::prog.println("size: {}", filt.size());
+
     struct sock_fprog prog = {
-            static_cast<unsigned short>(sizeof(filter) / sizeof(filter[0])),
-            filter,
+            static_cast<unsigned short>(filt.size()),
+            filt.data(),
     };
 
     jl::prog.println(JLGXY_FMT("configuring seccomp"));
@@ -596,14 +515,7 @@ std::string TracerOld::getdata(pid_t child, unsigned long long addr) {
 constexpr std::array<bool, 500> TracerOld::get_valid_calls() {
     // see /usr/include/x86_64-linux-gnu/asm/unistd_64.h
     std::array<bool, 500> res{};
-    std::initializer_list<std::pair<int, int>> calls{
-            {0, 1},     {3, 3},     {5, 5},     {7, 12},    {16, 21},   {32, 33},   {35, 36},
-            {60, 60},   {63, 63},   {89, 89},   {96, 98},   {158, 158}, {201, 201}, {202, 202},
-            {218, 218}, {224, 224}, {228, 231}, {257, 257}, {262, 262}, {267, 267}, {273, 273},
-            {292, 292}, {302, 302}, {318, 318}, {334, 334},
-    };
-    for (auto [l, r] : calls)
-        for (int id = l; id <= r; id++) res[id] = true;
+    for (auto i : _syscalls_allowed) res[i] = true;
     return res;
 }
 bool TracerOld::is_dangerous_syscall(long id, pid_t pid) {

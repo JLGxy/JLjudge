@@ -968,6 +968,7 @@ void JudgeAll::check_problem_compile_files() {
 }
 void JudgeAll::get_user_compile_list() {
     tot_compile_task_ = 0;
+    tot_compiled_ = 0;
     for (const auto &t : tasks_) {
         tot_compile_task_++;
         compile_list_.push(
@@ -978,6 +979,7 @@ void JudgeAll::get_user_compile_list() {
 void JudgeAll::inc_compile_progress() {
     std::lock_guard guard(compile_list_lock_);
     tot_compiled_++;
+    jl::prog.println("compiled: {} out of {}", tot_compiled_, tot_compile_task_);
     prop_ = base_prop_ + cur_prop_ * tot_compiled_ / tot_compile_task_;
     jl::prog.setprogress(prop_);
 }

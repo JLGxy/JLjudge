@@ -15,6 +15,8 @@
 
 static_assert(sizeof(void *) == 8, "can only compile and run on 64-bit machines");
 
+#include <asm/unistd_64.h>
+
 #include <array>
 #include <cstddef>
 #include <filesystem>
@@ -311,6 +313,56 @@ class ProgramWrapper {
 
     void startexe(int in, int out, int err, tm_usage_t /* time_lim */, mem_usage_t mem_lim,
                   const std::vector<std::string> &args) const __attribute__((__noreturn__));
+};
+
+constexpr int _syscalls_allowed[] = {
+        __NR_read,
+        __NR_write,
+        __NR_close,
+        __NR_fstat,
+        __NR_poll,
+        __NR_lseek,
+        __NR_mmap,
+        __NR_mprotect,
+        __NR_munmap,
+        __NR_brk,
+        __NR_ioctl,
+        __NR_pread64,
+        __NR_pwrite64,
+        __NR_dup,
+        __NR_dup2,
+        __NR_nanosleep,
+        __NR_getitimer,
+        __NR_getpid,
+        __NR_exit,
+        __NR_uname,
+        __NR_flock,
+        __NR_readlink,
+        __NR_gettimeofday,
+        __NR_getrlimit,
+        __NR_getrusage,
+        __NR_getppid,
+        __NR_arch_prctl,
+        __NR_time,
+        __NR_futex,
+        __NR_set_tid_address,
+        __NR_timer_gettime,
+        __NR_clock_gettime,
+        __NR_clock_getres,
+        __NR_clock_nanosleep,
+        __NR_exit_group,
+        __NR_newfstatat,
+        __NR_readlinkat,
+        __NR_set_robust_list,
+        __NR_get_robust_list,
+        __NR_dup3,
+        __NR_prlimit64,
+        __NR_getrandom,
+        __NR_rseq,
+};
+constexpr int _syscalls_traced[] = {
+        __NR_openat,  // trace openat syscall
+        __NR_execve,  // trace execve, only the first execve syscall is valid
 };
 
 class TracerOld {

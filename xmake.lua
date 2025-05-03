@@ -19,7 +19,6 @@ add_requires("yaml-cpp")
 add_requires("libxlsxwriter")
 add_requires("zlib")
 
-add_rules("plugin.compile_commands.autoupdate", {outputdir = ".vscode"})
 add_rules("plugin.compile_commands.autoupdate", {outputdir = "build"})
 
 target("judgecli")

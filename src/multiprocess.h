@@ -18,7 +18,10 @@ class Process {
                       "arguments must be invocable after conversion to rvalues");
 
         int pid = fork();
-        if (pid == -1) throw;
+        if (pid == -1) {
+            fail_ = true;
+            return;
+        }
         if (pid == 0) {
             f(std::forward(args)...);
             exit(0);
@@ -45,6 +48,7 @@ class Process {
         check_alive();
         return alive_;
     }
+    bool failed() const { return fail_; }
     bool if_exited() {
         check_alive();
         return !alive_ && WIFEXITED(status_);
@@ -67,9 +71,9 @@ class Process {
     int kill(int sig) const { return ::kill(pid_, sig); }
 
   private:
-    pid_t pid_;
+    pid_t pid_{};
     int status_;
-    bool alive_{false};
+    bool alive_{false}, fail_{false};
 
     void check_alive() {
         while (alive_) {

@@ -47,7 +47,8 @@ inline std::string data;
 class ProgressBar {
   public:
     ProgressBar() : main_pid_(getpid()) {
-        log_file_fd_ = openat(AT_FDCWD, "log.txt", O_WRONLY | O_APPEND | O_CREAT);
+        log_file_fd_ = openat(AT_FDCWD, "log.txt", O_WRONLY | O_APPEND | O_CREAT,
+                              S_IRWXU | S_IRGRP | S_IROTH);
         if (log_file_fd_ == -1) {
             throw std::runtime_error(std::string{"failed to open file "} + strerror(errno));
         }
@@ -84,7 +85,7 @@ class ProgressBar {
     auto write_log_to_err(std::string_view s) -> void {
         std::lock_guard guard(file_lock_);
         FileLock f_lock(log_file_fd_);
-        ::write(log_file_fd_, s.data(), s.size());
+        if (::write(log_file_fd_, s.data(), s.size()) == -1) {}
     }
 
     template <typename... Args>
