@@ -4,8 +4,26 @@
 
 #pragma once
 
+#include <asm/unistd_64.h>
 #include <fcntl.h>
 #include <unistd.h>
+
+#include <cstddef>
+#include <filesystem>
+#include <fstream>
+#include <initializer_list>
+#include <iostream>
+#include <optional>
+#include <random>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "config.h"  // IWYU pragma: export
+#include "multiprocess.h"
+
 #ifndef __linux__
 #error "only linux is supported"
 #endif
@@ -16,28 +34,13 @@
 
 static_assert(sizeof(void *) == 8, "can only compile and run on 64-bit machines");
 
-#include <asm/unistd_64.h>
-
-#include <cstddef>
-#include <filesystem>
-#include <fstream>
-#include <initializer_list>
-#include <iostream>
-#include <random>
-#include <sstream>
-#include <stdexcept>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include "config.h"  // IWYU pragma: export
-
 // #define JLGXY_SHOWSYSCALLS
 
 struct rusage;
 
 namespace jlgxy {
 
+namespace mpc = multiproc;
 namespace fs = std::filesystem;
 
 enum class verdict_t : std::int8_t {
@@ -407,10 +410,16 @@ class UnsafeCodeRunner {
   public:
     ProgramWrapper prog_, inter_prog_;
     std::vector<std::string> validinputs_, validoutputs_;
-    std::ostream &logs;
     Tracer tracer;
-    explicit UnsafeCodeRunner(std::ostream &os) : logs(os), tracer(validinputs_, validoutputs_) {}
-
+    explicit UnsafeCodeRunner() : tracer(validinputs_, validoutputs_) {}
+    static std::pair<tm_usage_t, mem_usage_t> get_time_mem(rusage &usage);
+    static std::optional<result_t> check_usage(tm_usage_t tm, mem_usage_t mem, tm_usage_t time_lim,
+                                               mem_usage_t mem_lim);
+    static std::optional<result_t> check_status(int status, tm_usage_t tm, mem_usage_t mem);
+    static result_t get_run_result(rusage &usage, int status, tm_usage_t time_lim,
+                                   mem_usage_t mem_lim, mpc::Process &proc);
+    pid_t start_tracee(MyPipe &inp, MyPipe &outp, tm_usage_t time_lim, mem_usage_t mem_lim,
+                       const std::vector<std::string> &args) const;
     result_t run(int /* id */, const std::string &in_data, std::string &out_data,
                  tm_usage_t time_lim, mem_usage_t mem_lim, const std::vector<std::string> &args);
     result_t run_interactive(int /* id */, tm_usage_t time_lim, mem_usage_t mem_lim);
@@ -428,13 +437,11 @@ std::pair<bool, const Compiler *> find_compiler_by_name(const std::vector<const 
 class Judger {
   public:
     const conf_t &config_;
-    std::stringstream logs;
     UnsafeCodeRunner runner_, chkrunner_;
     std::string out_data, in_data;
     fs::path tempdir;
 
-    explicit Judger(fs::path td, const conf_t &conf)
-            : config_(conf), runner_(logs), chkrunner_(logs), tempdir(std::move(td)) {}
+    explicit Judger(fs::path td, const conf_t &conf) : config_(conf), tempdir(std::move(td)) {}
 
     int get_input(int id);
     void clear_output();

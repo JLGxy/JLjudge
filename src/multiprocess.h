@@ -1,3 +1,5 @@
+#pragma once
+
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -69,6 +71,7 @@ class Process {
     }
 
     int kill(int sig) const { return ::kill(pid_, sig); }
+    int pid() const { return pid_; }
 
   private:
     pid_t pid_{};
@@ -89,5 +92,19 @@ class Process {
     }
     bool test_is_alive() const { return kill(0) != -1; }
 };
+
+template <typename T, typename... Args>
+pid_t start_process(T &&f, Args &&...args) {
+    static_assert(std::is_invocable<typename std::decay<T>::type,
+                                    typename std::decay<Args>::type...>::value,
+                  "arguments must be invocable after conversion to rvalues");
+    int pid = fork();
+    if (pid == -1) return -1;
+    if (pid == 0) {
+        f(std::forward(args)...);
+        exit(0);
+    }
+    return pid;
+}
 
 }  // namespace jlgxy::multiproc

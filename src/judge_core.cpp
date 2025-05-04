@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cassert>
 #include <csignal>
 #include <cstddef>
@@ -30,6 +31,7 @@
 #include <functional>
 #include <initializer_list>
 #include <iterator>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -42,8 +44,6 @@
 #include "multiprocess.h"
 
 namespace jlgxy {
-
-namespace mpc = multiproc;
 
 std::string verdict_to_str(verdict_t ver) {
     switch (ver) {
@@ -471,6 +471,7 @@ void ProgramWrapper::configure_seccomp() {
 
 void ProgramWrapper::startexe(MyPipe &&in, MyPipe &&out, MyPipe &&err, tm_usage_t /* time_lim */,
                               mem_usage_t mem_lim, const std::vector<std::string> &args) const {
+    signal(SIGPIPE, SIG_IGN);
     use_pipe_or_exit(in, out, err);
 
     std::vector<char *> argv;
@@ -485,10 +486,8 @@ void ProgramWrapper::startexe(MyPipe &&in, MyPipe &&out, MyPipe &&err, tm_usage_
     // rlim.rlim_max = time_lim/1000+2;
     // setrlimit(RLIMIT_CPU, &rlim);
     ptrace(PTRACE_TRACEME, 0, nullptr, nullptr);
-#ifdef JLGXY_ENABLE_SECCOMP
     kill(getpid(), SIGSTOP);
     configure_seccomp();
-#endif
     execvp(executable_.c_str(), argv.data());
     // execl(executable_.c_str(), "", nullptr);
     exit(3);
@@ -629,188 +628,174 @@ int Tracer::tracerwork(int pid, tm_usage_t time_lim, mem_usage_t /* mem_lim */, 
     }
     return status;
 }
+std::pair<tm_usage_t, mem_usage_t> UnsafeCodeRunner::get_time_mem(rusage &usage) {
+    tm_usage_t tm = (usage.ru_utime.tv_sec == -1)
+                            ? _tm_usage_inf
+                            : (usage.ru_utime.tv_usec / 1000) + (usage.ru_utime.tv_sec * 1000);
+    mem_usage_t mem = usage.ru_maxrss;
 
+    return {tm, mem};
+}
+std::optional<result_t> UnsafeCodeRunner::check_usage(tm_usage_t tm, mem_usage_t mem,
+                                                      tm_usage_t time_lim, mem_usage_t mem_lim) {
+    if (tm > time_lim) {
+        return result_t{verdict_t::_tle, _tm_usage_inf, mem, 0, _int_nan, ""};
+    }
+    if (mem > mem_lim) {
+        return result_t{verdict_t::_mle, tm, mem, 0, _int_nan, ""};
+    }
+    return std::nullopt;
+}
+
+std::optional<result_t> UnsafeCodeRunner::check_status(int status, tm_usage_t tm, mem_usage_t mem) {
+    jl::prog.println(JLGXY_FMT("status: {}"), status);
+    // if killed
+    if (WIFSIGNALED(status)) {
+        jl::prog.println(JLGXY_FMT("Killed"));
+        jl::prog.println(JLGXY_FMT("Signal: {}"), WTERMSIG(status));
+        if (WTERMSIG(status) == 31) {
+            return result_t{verdict_t::_re, tm, mem, 0, _int_nan, "bad system call"};
+        }
+        return result_t{verdict_t::_re, tm, mem, 0, _int_nan, "killed"};
+    }
+    jl::prog.println(JLGXY_FMT("Program returned {}"), WEXITSTATUS(status));
+    // return value is not zero
+    if (WEXITSTATUS(status)) {
+        return result_t{verdict_t::_re,
+                        tm,
+                        mem,
+                        0,
+                        WEXITSTATUS(status),
+                        "exit code: " + std::to_string(WEXITSTATUS(status))};
+    }
+    return std::nullopt;
+}
+
+result_t UnsafeCodeRunner::get_run_result(rusage &usage, int status, tm_usage_t time_lim,
+                                          mem_usage_t mem_lim, mpc::Process &proc) {
+    auto [tm, mem] = get_time_mem(usage);
+    auto ret = check_usage(tm, mem, time_lim, mem_lim);
+    if (ret.has_value()) return *ret;
+    ret = check_status(status, tm, mem);
+    if (ret.has_value()) return *ret;
+
+    if (proc.if_signaled()) {
+        jl::prog.println(JLGXY_FMT("monitor process signaled {}"), proc.term_sig());
+        return _failed_r;
+    }
+    if (proc.exit_status() != 0) {
+        jl::prog.println(JLGXY_FMT("monitor process exited {}"), proc.exit_status());
+        return _failed_r;
+    }
+
+    return {verdict_t::_ac, tm, mem, 1.0, 0, ""};
+}
+
+pid_t UnsafeCodeRunner::start_tracee(MyPipe &inp, MyPipe &outp, tm_usage_t time_lim,
+                                     mem_usage_t mem_lim,
+                                     const std::vector<std::string> &args) const {
+    if (inp.is_read_closed() || outp.is_read_closed()) {
+        jl::prog.println(JLGXY_FMT("Error creating pipe"));
+        return -1;
+    }
+    auto tracee_pid = mpc::start_process([&] {
+        prog_.startexe(std::move(inp), std::move(outp), null_pipe(), time_lim, mem_lim, args);
+    });
+    if (tracee_pid == -1) {
+        jl::prog.println(JLGXY_FMT("Error while forking"));
+        return -1;
+    }
+    return tracee_pid;
+}
 result_t UnsafeCodeRunner::run(int /* id */, const std::string &in_data, std::string &out_data,
                                tm_usage_t time_lim, mem_usage_t mem_lim,
                                const std::vector<std::string> &args) {
-    MyPipe outp, inp, resp;
-    if (outp.is_read_closed() || inp.is_read_closed() || resp.is_read_closed()) {
+    MyPipe inp, outp;
+    auto tracee_pid = start_tracee(inp, outp, time_lim, mem_lim, args);
+    if (tracee_pid == -1) return _failed_r;
+
+    MyPipe resp;
+    if (resp.is_read_closed()) {
         jl::prog.println(JLGXY_FMT("Error creating pipe"));
         return _failed_r;
     }
-    int pid[2];
-    int sid = myfork<2>(pid);
-    if (sid < 0) {
-        jl::prog.println(JLGXY_FMT("Error while forking"));
-        return _failed_r;
-    }
-    if (sid == 0) {
-        // tracee process
 
-        resp.close();
-        prog_.startexe(std::move(inp), std::move(outp), null_pipe(), time_lim, mem_lim, args);
-    } else if (sid == 1) {
+    mpc::Process io_handler([&] {
         // redirects the tracee's stdin/stdout
-        // read the data from tracee's stdout from `outp`, and send to
-        // the tracer through `resp`
-
+        // read the data from tracee's stdout from `outp`, and send to the tracer through `resp`
         signal(SIGPIPE, SIG_IGN);
         outp.close_write();
         inp.close_read();
         resp.close_read();
-        if (inp.write(in_data) == -1) {
-            jl::prog.println(JLGXY_FMT("Error writing input data"));
-            exit(1);
-        }
-        inp.close_write();
-        if (outp.read(out_data) == -1) {
-            jl::prog.println(JLGXY_FMT("Error while reading output"));
-            exit(1);
-        }
-        outp.close_read();
-        if (resp.write(out_data) == -1) {
+        std::atomic<bool> success = true;
+        std::thread write_thread([&] {
+            if (inp.write(in_data) == -1) success = false;
+            inp.close_write();
+        });
+        std::thread read_thread([&] {
+            if (outp.read(out_data) == -1) success = false;
+            outp.close_read();
+        });
+        write_thread.join();
+        read_thread.join();
+        if (success && resp.write(out_data) == -1) success = false;
+        resp.close_write();
+        if (!success) {
             jl::prog.println(JLGXY_FMT("Error transfering output data"));
             exit(1);
         }
-        resp.close_write();
         exit(0);
-    } else {
-        // tracer process
-
-        outp.close();
-        inp.close();
-        resp.close_write();
-
-        rusage usage;
-        int status = tracer.tracerwork(pid[0], time_lim, mem_lim, usage);
-
-        tm_usage_t tm = (usage.ru_utime.tv_usec / 1000) + (usage.ru_utime.tv_sec * 1000);
-        mem_usage_t mem = usage.ru_maxrss;
-
-        if (resp.read(out_data) == -1) {
-            jl::prog.println(JLGXY_FMT("Error while reading output"));
-            return _failed_r;
-        }
-        resp.close_read();
-
-        int status2 = 0;
-        waitpid(pid[1], &status2, 0);  // the second subprocess
-
-        if (usage.ru_utime.tv_sec == -1 || tm > time_lim) {
-            return {verdict_t::_tle, _tm_usage_inf, mem, 0, _int_nan, ""};
-        }
-        if (mem > mem_lim) {
-            return {verdict_t::_mle, tm, mem, 0, _int_nan, ""};
-        }
-        // if killed
-        if (WIFSIGNALED(status)) {
-            jl::prog.println(JLGXY_FMT("Killed"));
-            jl::prog.println(JLGXY_FMT("Signal: {}"), WTERMSIG(status));
-            if (WTERMSIG(status) == 31) {
-                return {verdict_t::_re, tm, mem, 0, _int_nan, "bad system call"};
-            }
-            return {verdict_t::_re, tm, mem, 0, _int_nan, "killed"};
-        }
-        jl::prog.println(JLGXY_FMT("Program returned {}"), WEXITSTATUS(status));
-        // return value is not zero
-        if (WEXITSTATUS(status)) {
-            return {verdict_t::_re,
-                    tm,
-                    mem,
-                    0,
-                    WEXITSTATUS(status),
-                    "exit code: " + std::to_string(WEXITSTATUS(status))};
-        }
-        if (WIFSIGNALED(status2) || WEXITSTATUS(status2)) {
-            if (WIFSIGNALED(status2))
-                jl::prog.println(JLGXY_FMT("io process signaled {}"), WTERMSIG(status2));
-            if (WEXITSTATUS(status2))
-                jl::prog.println(JLGXY_FMT("io process exited {}"), WEXITSTATUS(status2));
-            return _failed_r;
-        }
-        return {verdict_t::_ac, tm, mem, 1.0, 0, ""};
-    }
-}
-
-result_t UnsafeCodeRunner::run_interactive(int /* id */, tm_usage_t time_lim, mem_usage_t mem_lim) {
-    tracer.iscalling_ = false;
-    MyPipe outp, inp;
-    if (outp.is_read_closed() || inp.is_read_closed()) {
-        jl::prog.println(JLGXY_FMT("Error creating pipe"));
-        return _failed_r;
-    }
-    int pid[2];
-    int sid = myfork<2>(pid);
-    if (sid < 0) {
+    });
+    if (io_handler.failed()) {
         jl::prog.println(JLGXY_FMT("Error while forking"));
         return _failed_r;
     }
-    if (sid == 0) {
-        // tracee process 1
 
-        signal(SIGPIPE, SIG_IGN);
-        prog_.startexe(std::move(inp), std::move(outp), null_pipe(), time_lim, mem_lim, {});
-    } else if (sid == 1) {
-        int ppid[1];
-        int ssid = myfork<1>(ppid);
-        if (ssid == 0) {
-            // tracee process 2
+    inp.close();
+    outp.close();
+    resp.close_write();
 
-            signal(SIGPIPE, SIG_IGN);
+    rusage usage;
+    int status = tracer.tracerwork(tracee_pid, time_lim, mem_lim, usage);
+
+    if (resp.read(out_data) == -1) {
+        jl::prog.println(JLGXY_FMT("Error while reading output"));
+        return _failed_r;
+    }
+    resp.close_read();
+
+    io_handler.join();
+
+    return get_run_result(usage, status, time_lim, mem_lim, io_handler);
+}
+
+result_t UnsafeCodeRunner::run_interactive(int /* id */, tm_usage_t time_lim, mem_usage_t mem_lim) {
+    MyPipe inp, outp;
+    auto tracee_pid = start_tracee(inp, outp, time_lim, mem_lim, {});
+    if (tracee_pid == -1) return _failed_r;
+
+    auto inter_proc = mpc::Process([&] {
+        auto prog_pid = mpc::start_process([&] {
             inter_prog_.startexe(std::move(outp), std::move(inp), null_pipe(), time_lim, mem_lim,
                                  {});
-        } else {
-            // tracer process 2
-
-            inp.close();
-            outp.close();
-            rusage usage;
-            int status = tracer.tracerwork(ppid[0], time_lim, mem_lim, usage);
-            exit(WEXITSTATUS(status));
-        }
-
-    } else {
-        // tracer process 1
+        });
 
         inp.close();
         outp.close();
-
         rusage usage;
-        int status = tracer.tracerwork(pid[0], time_lim, mem_lim, usage);
+        int status = tracer.tracerwork(prog_pid, time_lim, mem_lim, usage);
+        exit(WEXITSTATUS(status));
+    });
 
-        tm_usage_t tm = (usage.ru_utime.tv_usec / 1000) + (usage.ru_utime.tv_sec * 1000);
-        mem_usage_t mem = usage.ru_maxrss;
+    inp.close();
+    outp.close();
 
-        int status2 = 0;
-        waitpid(pid[1], &status2, 0);  // tracer 2
+    rusage usage;
+    int status = tracer.tracerwork(tracee_pid, time_lim, mem_lim, usage);
 
-        if (tm > time_lim) {
-            return {verdict_t::_tle, tm, mem, 0, _int_nan, ""};
-        }
-        if (mem > mem_lim) {
-            return {verdict_t::_mle, tm, mem, 0, _int_nan, ""};
-        }
-        // if killed
-        if (WIFSIGNALED(status)) {
-            jl::prog.println(JLGXY_FMT("Killed"));
-            jl::prog.println(JLGXY_FMT("Signal: {}"), WTERMSIG(status));
-            return {verdict_t::_re, tm, mem, 0, _int_nan, "killed"};
-        }
-        jl::prog.println(JLGXY_FMT("Program returned {}"), WEXITSTATUS(status));
-        // return value is not zero
-        if (WEXITSTATUS(status)) {
-            return {verdict_t::_re,
-                    tm,
-                    mem,
-                    0,
-                    WEXITSTATUS(status),
-                    "exit code: " + std::to_string(WEXITSTATUS(status))};
-        }
-        if (WIFSIGNALED(status2) || WEXITSTATUS(status2)) {
-            return _failed_r;
-        }
-        return {verdict_t::_ac, tm, mem, 1.0, WEXITSTATUS(status), ""};
-    }
+    inter_proc.join();
+
+    return get_run_result(usage, status, time_lim, mem_lim, inter_proc);
 }
 
 verdict_t compile_to(const fs::path &src, const fs::path &exe, const Compiler &compc,
