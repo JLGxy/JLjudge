@@ -252,19 +252,22 @@ void set_mem_lim(mem_usage_t mem_lim) {
     setrlimit(RLIMIT_STACK, &rlim);
 }
 
+void exit_with(std::string_view s, int exit_status) {
+    jl::prog.println(JLGXY_FMT("{}"), s);
+    exit(exit_status);
+}
+
 void redirect_or_exit(int in, int out, int err, int fail_status = 4) {
-    if (in != -1 && dup2(in, STDIN_FILENO) == -1) {
-        jl::prog.println(JLGXY_FMT("Failed to redirect"));
-        exit(fail_status);
-    }
-    if (out != -1 && dup2(out, STDOUT_FILENO) == -1) {
-        jl::prog.println(JLGXY_FMT("Failed to redirect"));
-        exit(fail_status);
-    }
-    if (err != -1 && dup2(err, STDERR_FILENO) == -1) {
-        jl::prog.println(JLGXY_FMT("Failed to redirect"));
-        exit(fail_status);
-    }
+    if (dup2(in, STDIN_FILENO) == -1) exit_with("Failed to redirect", fail_status);
+    if (dup2(out, STDOUT_FILENO) == -1) exit_with("Failed to redirect", fail_status);
+    if (dup2(err, STDERR_FILENO) == -1) exit_with("Failed to redirect", fail_status);
+}
+
+void use_pipe_or_exit(MyPipe &in, MyPipe &out, MyPipe &err) {
+    in.close_write();
+    out.close_read();
+    err.close_read();
+    redirect_or_exit(in.read_fd(), out.write_fd(), err.write_fd());
 }
 
 }  // namespace
@@ -466,9 +469,9 @@ void ProgramWrapper::configure_seccomp() {
     jl::prog.println(JLGXY_FMT("seccomp configured"));
 }
 
-void ProgramWrapper::startexe(int in, int out, int err, tm_usage_t /* time_lim */,
+void ProgramWrapper::startexe(MyPipe &&in, MyPipe &&out, MyPipe &&err, tm_usage_t /* time_lim */,
                               mem_usage_t mem_lim, const std::vector<std::string> &args) const {
-    redirect_or_exit(in, out, err);
+    use_pipe_or_exit(in, out, err);
 
     std::vector<char *> argv;
     argv.emplace_back(const_cast<char *>(executable_.c_str()));
@@ -489,147 +492,6 @@ void ProgramWrapper::startexe(int in, int out, int err, tm_usage_t /* time_lim *
     execvp(executable_.c_str(), argv.data());
     // execl(executable_.c_str(), "", nullptr);
     exit(3);
-}
-
-std::string TracerOld::getdata(pid_t child, unsigned long long addr) {
-    std::string ans;
-    while (true) {
-        union {
-            unsigned long long val;
-            char chars[8];
-        } data;
-        data.val = ptrace(PTRACE_PEEKDATA, child, addr, nullptr);
-        int end = 0;
-        for (char ch : data.chars) {
-            if (!static_cast<int>(ch)) {
-                end = 1;
-                break;
-            }
-            ans += ch;
-        }
-        if (end) break;
-        addr += 8;
-    }
-    return ans;
-}
-constexpr std::array<bool, 500> TracerOld::get_valid_calls() {
-    // see /usr/include/x86_64-linux-gnu/asm/unistd_64.h
-    std::array<bool, 500> res{};
-    for (auto i : _syscalls_allowed) res[i] = true;
-    return res;
-}
-bool TracerOld::is_dangerous_syscall(long id, pid_t pid) {
-    if (id == 257) {
-        if (!iscalling_) {  // syscall-entry-stop
-            iscalling_ = true;
-            user_regs_struct regs;
-            ptrace(PTRACE_GETREGS, pid, nullptr, &regs);
-            if (static_cast<int>(regs.rdi) != AT_FDCWD) return true;
-            std::string filename = getdata(pid, regs.rsi);
-            while (filename.length() > 2 && startswith(filename, "./")) {
-                filename.erase(filename.begin(), filename.begin() + 2);
-            }
-            // jl::p.println(JLGXY_FMT(<< filename));
-            if ((regs.rdx & 3) == O_RDONLY) {
-                if (find(validinputs_p_->begin(), validinputs_p_->end(), filename) ==
-                            validinputs_p_->end() &&
-                    startswith(filename, "/etc/") && startswith(filename, "/lib/"))
-                    return true;
-            } else if ((regs.rdx & 3) == O_WRONLY) {
-                if (find(validoutputs_p_->begin(), validoutputs_p_->end(), filename) ==
-                    validoutputs_p_->end())
-                    return true;
-            } else {
-                return true;
-            }
-        } else {  // syscall-exit-stop
-            iscalling_ = false;
-        }
-        return false;
-    }
-    constexpr auto _is_valid_call = get_valid_calls();
-    return !_is_valid_call[id];
-}
-void TracerOld::signal_handler(int) {
-    jl::prog.println(JLGXY_FMT("timeout"));
-    kill(child_pid_, SIGKILL);
-}
-int TracerOld::tracerwork(int pid, tm_usage_t time_lim, mem_usage_t mem_lim, rusage &usage) {
-    iscalling_ = false;
-    auto hard_tm_lim = time_lim + (time_lim / 10);
-
-    int status = 0;
-    waitpid(pid, &status, 0);
-    ptrace(PTRACE_SETOPTIONS, pid, 0, PTRACE_O_TRACESYSGOOD | PTRACE_O_EXITKILL);
-    // ptrace(PTRACE_CONT, pid, nullptr, nullptr);
-    // return waitpid(pid, nullptr, 0);
-    ptrace(PTRACE_SYSCALL, pid, nullptr, nullptr);  // 59 execve
-    child_pid_ = pid;
-    signal(SIGALRM, signal_handler);  // kill the process if it has been
-    // hanging for too long
-
-    const long lim_us = (time_lim * 1000) + 50000;
-    const itimerval new_value = {{0, 0}, {lim_us / 1000000, lim_us % 1000000}};
-    const itimerval zero_value = {{0, 0}, {0, 0}};
-    itimerval old_value;
-
-    [[maybe_unused]] int syscall_cnt = 0;
-
-    while (true) {
-        if (setitimer(ITIMER_REAL, &new_value, &old_value) == -1) {
-            jl::prog.println(JLGXY_FMT("setitimer error"));
-            kill(pid, SIGKILL);
-            wait4(pid, &status, 0, &usage);
-            break;
-        }
-        int oid = wait4(pid, &status, 0, &usage);
-        if (!oid) jl::prog.println(JLGXY_FMT("err: {}"), oid);
-        if (setitimer(ITIMER_REAL, &zero_value, &old_value) == -1) {
-            jl::prog.println(JLGXY_FMT("setitimer error"));
-            kill(pid, SIGKILL);
-            wait4(pid, &status, 0, &usage);
-            break;
-        }
-        ++syscall_cnt;
-
-        // jl::p.println(JLGXY_FMT(<< "child " << nw << " got signal " << WSTOPSIG(status)));
-        if (WIFEXITED(status) || WIFSIGNALED(status)) break;
-        if (!(WSTOPSIG(status) & 0x80)) {
-            jl::prog.println(JLGXY_FMT("{} got signal {}"), pid, WSTOPSIG(status));
-            // ptrace(PTRACE_SYSCALL, pid, NULL, NULL);
-            kill(pid, SIGKILL);
-            wait4(pid, &status, 0, &usage);
-            break;
-            // ptrace(PTRACE_SYSCALL, pid, nullptr, nullptr);
-            // continue;
-        }
-        // kill
-        long orig_rax = ptrace(PTRACE_PEEKUSER, pid, 8 * ORIG_RAX, nullptr);
-#ifdef JLGXY_SHOWSYSCALLS
-        jl::prog.println(JLGXY_FMT("{} called: {}"), pid, orig_rax);
-#endif
-        if (is_dangerous_syscall(orig_rax, pid)) {
-            jl::prog.println(JLGXY_FMT("Dangerous syscall: {}"), orig_rax);
-            // exit(1);  // debug
-            kill(pid, SIGKILL);
-            wait4(pid, &status, 0, &usage);
-            break;
-        }
-        if (syscall_cnt % 10000 == 0) {
-            jl::prog.println(JLGXY_FMT("{} used {} {} {} {} {}"), syscall_cnt,
-                             usage.ru_utime.tv_sec, usage.ru_utime.tv_usec, usage.ru_stime.tv_sec,
-                             usage.ru_stime.tv_usec, usage.ru_maxrss);
-        }
-        if (((usage.ru_utime.tv_sec * 1000)) + (usage.ru_utime.tv_usec / 1000) > hard_tm_lim ||
-            ((usage.ru_stime.tv_sec * 1000)) + (usage.ru_stime.tv_usec / 1000) > hard_tm_lim * 3 ||
-            usage.ru_maxrss > mem_lim) {
-            kill(pid, SIGKILL);
-            wait4(pid, &status, 0, &usage);
-            break;
-        }
-        ptrace(PTRACE_SYSCALL, pid, nullptr, nullptr);
-    }
-    return status;
 }
 
 std::string Tracer::getdata(pid_t child, unsigned long long addr) {
@@ -785,15 +647,8 @@ result_t UnsafeCodeRunner::run(int /* id */, const std::string &in_data, std::st
     if (sid == 0) {
         // tracee process
 
-        outp.close_read();
-        inp.close_write();
         resp.close();
-        int nfd = open("/dev/null", O_WRONLY);
-        if (nfd == -1) {
-            jl::prog.println(JLGXY_FMT("Failed to open /dev/null"));
-            exit(1);
-        }
-        prog_.startexe(inp.read_fd(), outp.write_fd(), nfd, time_lim, mem_lim, args);
+        prog_.startexe(std::move(inp), std::move(outp), null_pipe(), time_lim, mem_lim, args);
     } else if (sid == 1) {
         // redirects the tracee's stdin/stdout
         // read the data from tracee's stdout from `outp`, and send to
@@ -894,14 +749,7 @@ result_t UnsafeCodeRunner::run_interactive(int /* id */, tm_usage_t time_lim, me
         // tracee process 1
 
         signal(SIGPIPE, SIG_IGN);
-        outp.close_read();
-        inp.close_write();
-        int nfd = open("/dev/null", O_WRONLY);
-        if (nfd == -1) {
-            jl::prog.println(JLGXY_FMT("Failed to open /dev/null"));
-            exit(1);
-        }
-        prog_.startexe(inp.read_fd(), outp.write_fd(), nfd, time_lim, mem_lim, {});
+        prog_.startexe(std::move(inp), std::move(outp), null_pipe(), time_lim, mem_lim, {});
     } else if (sid == 1) {
         int ppid[1];
         int ssid = myfork<1>(ppid);
@@ -909,14 +757,8 @@ result_t UnsafeCodeRunner::run_interactive(int /* id */, tm_usage_t time_lim, me
             // tracee process 2
 
             signal(SIGPIPE, SIG_IGN);
-            outp.close_write();
-            inp.close_read();
-            int nfd = open("/dev/null", O_WRONLY);
-            if (nfd == -1) {
-                jl::prog.println(JLGXY_FMT("Failed to open /dev/null"));
-                exit(1);
-            }
-            inter_prog_.startexe(outp.read_fd(), inp.write_fd(), nfd, time_lim, mem_lim, {});
+            inter_prog_.startexe(std::move(outp), std::move(inp), null_pipe(), time_lim, mem_lim,
+                                 {});
         } else {
             // tracer process 2
 

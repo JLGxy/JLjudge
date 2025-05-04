@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <fcntl.h>
 #include <unistd.h>
 #ifndef __linux__
 #error "only linux is supported"
@@ -17,7 +18,6 @@ static_assert(sizeof(void *) == 8, "can only compile and run on 64-bit machines"
 
 #include <asm/unistd_64.h>
 
-#include <array>
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
@@ -33,8 +33,6 @@ static_assert(sizeof(void *) == 8, "can only compile and run on 64-bit machines"
 #include "config.h"  // IWYU pragma: export
 
 // #define JLGXY_SHOWSYSCALLS
-
-#define JLGXY_ENABLE_SECCOMP
 
 struct rusage;
 
@@ -233,10 +231,27 @@ class MyPipe {
     bool is_read_closed() const { return closed_[0]; }
     bool is_write_closed() const { return closed_[1]; }
 
+    inline friend MyPipe null_pipe();
+
   private:
+    MyPipe(int read_fd, int write_fd) : fd_{read_fd, write_fd}, closed_{false, false} {}
     int fd_[2]{};
     bool closed_[2]{false, false};
 };
+
+inline MyPipe null_pipe() {
+    int read_fd = open("/dev/null", O_RDONLY);
+    int write_fd = open("/dev/null", O_WRONLY);
+    if (read_fd == -1 || write_fd == -1) {
+        close(read_fd);
+        close(write_fd);
+        MyPipe p(-1, -1);
+        p.closed_[0] = p.closed_[1] = true;
+        return p;
+    }
+    MyPipe p(read_fd, write_fd);
+    return p;
+}
 
 // Create C subprocesses
 template <int C>
@@ -311,8 +326,9 @@ class ProgramWrapper {
                       const std::vector<std::string> &additional_args = {}) const;
     static void configure_seccomp();
 
-    void startexe(int in, int out, int err, tm_usage_t /* time_lim */, mem_usage_t mem_lim,
-                  const std::vector<std::string> &args) const __attribute__((__noreturn__));
+    void startexe(MyPipe &&in, MyPipe &&out, MyPipe &&err, tm_usage_t /* time_lim */,
+                  mem_usage_t mem_lim, const std::vector<std::string> &args) const
+            __attribute__((__noreturn__));
 };
 
 constexpr int _syscalls_allowed[] = {
@@ -365,21 +381,6 @@ constexpr int _syscalls_traced[] = {
         __NR_execve,  // trace execve, only the first execve syscall is valid
 };
 
-class TracerOld {
-  public:
-    bool iscalling_ = false;
-    const std::vector<std::string> *validinputs_p_, *validoutputs_p_;
-    TracerOld(const std::vector<std::string> &validinputs,
-              const std::vector<std::string> &validoutputs)
-            : validinputs_p_(&validinputs), validoutputs_p_(&validoutputs) {}
-    static std::string getdata(pid_t child, unsigned long long addr);
-    static constexpr std::array<bool, 500> get_valid_calls();
-    bool is_dangerous_syscall(long id, pid_t pid);
-    static inline int child_pid_;
-    static void signal_handler(int);
-    int tracerwork(int pid, tm_usage_t time_lim, mem_usage_t mem_lim, rusage &usage);
-};
-
 class Tracer {
   public:
     bool iscalling_ = false;
@@ -407,12 +408,7 @@ class UnsafeCodeRunner {
     ProgramWrapper prog_, inter_prog_;
     std::vector<std::string> validinputs_, validoutputs_;
     std::ostream &logs;
-#ifdef JLGXY_ENABLE_SECCOMP
-    Tracer
-#else
-    TracerOld
-#endif
-            tracer;
+    Tracer tracer;
     explicit UnsafeCodeRunner(std::ostream &os) : logs(os), tracer(validinputs_, validoutputs_) {}
 
     result_t run(int /* id */, const std::string &in_data, std::string &out_data,
