@@ -370,6 +370,10 @@ using prob_sub_vec = std::vector<std::vector<const sub_info_t *>>;
 
 inline bool is_ac_sub(const sub_info_t &s) { return s.result.sco.final_verdict == verdict_t::_ac; }
 
+int compare_strint(std::string_view a, std::string_view b);
+
+int compare_filename(std::string_view a, std::string_view b);
+
 class JudgeAll {
   public:
     fs::path data_dir, source_dir, temp_dir;

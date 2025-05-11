@@ -3,3 +3,4 @@
 .xmake
 build
 src/test
+log.txt

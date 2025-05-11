@@ -5,6 +5,7 @@
 #include "judge_local.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -482,6 +483,40 @@ tm_usage_t get_tot_judge_time(const conf_t &config) {
         ret += tc.time_lim;
     }
     return ret;
+}
+
+int compare_strint(std::string_view a, std::string_view b) {
+    auto oa = a, ob = b;
+    while (a.size() > 1 && a[0] == '0') a = a.substr(1);
+    while (b.size() > 1 && b[0] == '0') b = b.substr(1);
+    if (a.length() != b.length()) return a.length() < b.length() ? -1 : 1;
+    int r = a.compare(b);
+    if (r) return r;
+    return oa.compare(ob);
+}
+
+int compare_filename(const std::string_view a, const std::string_view b) {
+    auto read_int = [](const std::string_view s) {
+        std::size_t len = 0;
+        while (len < s.size() && std::isdigit(s[len])) len++;
+        return s.substr(0, len);
+    };
+    std::size_t cur = 0;
+    while (cur < a.size() && cur < b.size()) {
+        if (std::isdigit(a[cur]) != std::isdigit(b[cur])) {
+            return std::isdigit(a[cur]) > std::isdigit(b[cur]) ? -1 : 1;
+        }
+        if (!std::isdigit(a[cur])) {
+            if (a[cur] != b[cur]) return a[cur] < b[cur] ? -1 : 1;
+            cur++;
+        } else {
+            int r = compare_strint(read_int(a.substr(cur)), read_int(b.substr(cur)));
+            if (r) return r;
+            while (cur < a.size() && std::isdigit(a[cur])) cur++;
+        }
+    }
+    if (a.size() == b.size()) return 0;
+    return a.size() < b.size() ? -1 : 1;
 }
 
 JudgeAll::JudgeAll(fs::path dd, fs::path sd, fs::path td)
@@ -1345,5 +1380,3 @@ class CliHandler {
 }  // namespace cli
 
 }  // namespace jlgxy
-
-int main(int argc, char **argv) { return jlgxy::CliRunner::run(argc, argv); }
