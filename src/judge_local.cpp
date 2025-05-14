@@ -832,14 +832,11 @@ void JudgeAll::read_config(const fs::path &conf_file, conf_t &conf) const {
     YAML::Node node = YAML::Load(conf_stream);
 
     conf.name = node["name"].as<std::string>();
-    {
-        for (const auto &cname_node : node["compilers"]) {
-            // auto &&cname = node["compiler"].as<std::string>();
-            auto &&cname = cname_node.as<std::string>();
-            auto [found, compc] = find_compiler_by_name(compilers_p, cname);
-            if (!found) throw std::runtime_error("compiler(" + cname + ") not found");
-            conf.compiler.emplace_back(compc);
-        }
+    for (const auto &cname_node : node["compilers"]) {
+        auto &&cname = cname_node.as<std::string>();
+        auto [found, compc] = find_compiler_by_name(compilers_p, cname);
+        if (!found) throw std::runtime_error("compiler(" + cname + ") not found");
+        conf.compiler.emplace_back(compc);
     }
     conf.input_file = node["input_file"].as<std::string>();
     conf.output_file = node["output_file"].as<std::string>();
@@ -886,6 +883,15 @@ void JudgeAll::read_config(const fs::path &conf_file, conf_t &conf) const {
             for (auto it = tc_nodes.begin(); it != tc_nodes.end(); ++it) {
                 cur_conf.testcases.emplace_back(it->as<int>() - 1);
             }
+            const auto &&pre_node = cur_node["pre"];
+            if (pre_node) {
+                for (auto k : pre_node) {
+                    cur_conf.pre.emplace_back(k.as<int>());
+                }
+            }
+            if (cur_node["punishment"]) {
+                cur_conf.punish = cur_node["punishment"].as<double>();
+            }
         }
     } else {
         auto &cur_conf = conf.subtask_conf.emplace_back();
@@ -920,6 +926,9 @@ void JudgeAll::check_valid() const {
         int subid = 0;
         for (const auto &subtask : config.subtask_conf) {
             subid++;
+            if (subtask.testcases.empty()) {
+                print_problem_config_warning(prob_name, "empty subtask #" + std::to_string(subid));
+            }
             for (auto id : subtask.testcases) {
                 if (id < 0 || id >= static_cast<int>(config.testcase_conf.size())) {
                     throw ProblemConfigError(
@@ -927,6 +936,16 @@ void JudgeAll::check_valid() const {
                                                ": invalid testcase #" + std::to_string(id + 1) +
                                                ", violates the range [" + std::to_string(1) + ", " +
                                                std::to_string(config.testcase_conf.size()) + "]");
+                }
+            }
+            for (auto id : subtask.pre) {
+                if (id < 0 || id >= static_cast<int>(config.subtask_conf.size())) {
+                    throw ProblemConfigError(
+                            prob_name, "in subtask #" + std::to_string(subid) +
+                                               ": requirements invalid, subtask #" +
+                                               std::to_string(id + 1) + ", violates the range [" +
+                                               std::to_string(1) + ", " +
+                                               std::to_string(config.subtask_conf.size()) + "]");
                 }
             }
         }
@@ -1301,6 +1320,7 @@ int CliRunner::try_run(int argc, char **argv) {
     if (strcmp(argv[1], "judge") == 0) {
         judgeall.subs.loads_from_args(argc - 2, argv + 2);
         judgeall.judge_main();
+        jl::prog.println("finish, pid={}", getpid());
         return 0;
     }
     if (strcmp(argv[1], "export") == 0) {

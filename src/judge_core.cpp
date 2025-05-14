@@ -26,6 +26,7 @@
 #include <csignal>
 #include <cstddef>
 #include <cstdlib>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -159,7 +160,20 @@ scores_t list_result_t::calc_score(const conf_t &conf) const {
         ret.final_verdict = results.empty() ? verdict_t::_failed : results[0].res;
         return ret;
     }
+    std::deque<bool> sub_ac;
+    for (const auto &subtask : conf.subtask_conf) {
+        sub_ac.emplace_back(std::all_of(subtask.testcases.begin(), subtask.testcases.end(),
+                                        [&](int tc) { return results[tc].res == verdict_t::_ac; }));
+    }
+    int sub_id = 0;
     for (const auto &sub : conf.subtask_conf) {
+        ++sub_id;
+        bool pre_passed =
+                std::all_of(sub.pre.begin(), sub.pre.end(), [&](int st) { return sub_ac[st]; });
+        if (!pre_passed) {
+            ret.scores.emplace_back(0);
+            continue;
+        }
         double cur = 0;
         if (sub.scoring == scoring_t::_c_sum) {
             cur = 0;
@@ -175,6 +189,7 @@ scores_t list_result_t::calc_score(const conf_t &conf) const {
             throw std::runtime_error("unknown scoring method");
         }
         cur *= sub.tot_score;
+        if (!sub_ac[sub_id - 1]) cur += sub.punish;
         ret.scores.emplace_back(cur);
     }
     ret.score = 0;
@@ -250,6 +265,13 @@ void set_mem_lim(mem_usage_t mem_lim) {
     rlim.rlim_max = static_cast<rlim_t>(mem_lim);
     setrlimit(RLIMIT_DATA, &rlim);
     setrlimit(RLIMIT_STACK, &rlim);
+    setrlimit(RLIMIT_RSS, &rlim);
+}
+void disable_core_dump() {
+    rlimit rlim;
+    rlim.rlim_cur = 0;
+    rlim.rlim_max = 0;
+    setrlimit(RLIMIT_CORE, &rlim);
 }
 
 void exit_with(std::string_view s, int exit_status) {
@@ -365,82 +387,78 @@ void ProgramWrapper::settimer(int pid) {
 void ProgramWrapper::clrtimer() { realtimer(0); }
 
 // TODO(JLGxy): implementation
-verdict_t ProgramWrapper::check_pramgas(const Compiler &compc, const fs::path &tempdir) const {
+verdict_t ProgramWrapper::check_pramgas(const Compiler &compc,
+                                        const fs::path & /* tempdir */) const {
     if (!compc.is_gcc_or_clang()) return verdict_t::_ac;
-    compile(compc, tempdir, {"-E"});
-    std::ifstream fin(executable_);
+
+    mpc::Process proc([&] {
+        // compc.compile(source_, );
+    });
+    proc.join();
 
     // TODO(JLGxy): impl
 
-    fin.close();
     fs::remove(executable_);
     return verdict_t::_ac;
 }
 
+// TODO(JLgxy): refactor
 verdict_t ProgramWrapper::compile(const Compiler &compc, const fs::path &tempdir,
                                   const std::vector<std::string> &additional_args) const {
-    int pid = fork();
-    if (pid < 0) {
-        jl::prog.println(JLGXY_FMT("Error while forking"));
-        return verdict_t::_failed;
-    }
     fs::path outfn = tempdir / ("compile_" + randstr() +
                                 ".out");  // random should be in the main process, otherwise it
                                           // will results in same random seed
     fs::path errfn = tempdir / ("compile_" + randstr() + ".err");
-    if (pid == 0) {
-        if (!access(outfn.c_str(), F_OK)) {
-            unlinkat(AT_FDCWD, outfn.c_str(), 0);
-        }
-        if (!access(errfn.c_str(), F_OK)) {
-            unlinkat(AT_FDCWD, errfn.c_str(), 0);
-        }
-        int ppid = fork();
-        if (ppid < 0) {
-            jl::prog.println(JLGXY_FMT("Error while forking"));
-            return verdict_t::_failed;
-        }
-        if (ppid == 0) {
+    mpc::Process proc([&] {
+        if (fs::exists(outfn)) fs::remove_all(outfn);
+        if (fs::exists(errfn)) fs::remove_all(errfn);
+        auto ppid = mpc::start_process([&] {
             jl::prog.println(JLGXY_FMT("compiling: {}"), source_);
             open_and_dup_log_file(outfn, STDOUT_FILENO);
             open_and_dup_log_file(errfn, STDERR_FILENO);
+
             set_mem_lim(2L << 30);
+            disable_core_dump();
 
             compc.compile(source_, executable_, additional_args);
-        } else {
-            settimer(ppid);
-            int status = 0;
-            do {
-                waitpid(ppid, &status, 0);
-            } while (!WIFEXITED(status) && !WIFSIGNALED(status));
-            clrtimer();
-            std::string compilelog;
-            compilelog.resize(400);
-            auto len = std::ifstream(errfn).read(compilelog.data(), 400).gcount();
-            compilelog.resize(len);
-            jl::prog.println(JLGXY_FMT("compiler: "));
-            jl::prog.println(JLGXY_FMT("---------------"));
-            jl::prog.println(JLGXY_FMT("{}"), compilelog);
-            jl::prog.println(JLGXY_FMT("---------------"));
-            if (WIFSIGNALED(status)) {
-                jl::prog.println(JLGXY_FMT("compiler killed"));
-                jl::prog.println(JLGXY_FMT("signal: {}"), WTERMSIG(status));
-                exit(static_cast<int>(verdict_t::_ce));
-            }
-            jl::prog.println(JLGXY_FMT("Compiler returned {}"), WEXITSTATUS(status));
-            if (WEXITSTATUS(status)) {
-                exit(static_cast<int>(verdict_t::_ce));
-            }
-            exit(static_cast<int>(verdict_t::_ac));
+        });
+
+        if (ppid < 0) {
+            jl::prog.println(JLGXY_FMT("Error while forking"));
+            exit(static_cast<int>(verdict_t::_failed));
         }
-    } else {
+
+        settimer(ppid);
         int status = 0;
         do {
-            waitpid(pid, &status, 0);
+            waitpid(ppid, &status, 0);
         } while (!WIFEXITED(status) && !WIFSIGNALED(status));
-        if (WIFEXITED(status)) return static_cast<verdict_t>(WEXITSTATUS(status));
+        clrtimer();
+        std::string compilelog;
+        compilelog.resize(400);
+        auto len = std::ifstream(errfn).read(compilelog.data(), 400).gcount();
+        compilelog.resize(len);
+        jl::prog.println(JLGXY_FMT("compiler: "));
+        jl::prog.println(JLGXY_FMT("---------------"));
+        jl::prog.println(JLGXY_FMT("{}"), compilelog);
+        jl::prog.println(JLGXY_FMT("---------------"));
+        if (WIFSIGNALED(status)) {
+            jl::prog.println(JLGXY_FMT("compiler killed"));
+            jl::prog.println(JLGXY_FMT("signal: {}"), WTERMSIG(status));
+            exit(static_cast<int>(verdict_t::_ce));
+        }
+        jl::prog.println(JLGXY_FMT("Compiler returned {}"), WEXITSTATUS(status));
+        if (WEXITSTATUS(status)) {
+            exit(static_cast<int>(verdict_t::_ce));
+        }
+        exit(static_cast<int>(verdict_t::_ac));
+    });
+    if (proc.failed()) {
+        jl::prog.println(JLGXY_FMT("Error while forking"));
         return verdict_t::_failed;
     }
+    proc.join();
+    if (proc.if_signaled() || proc.exit_status() != 0) return verdict_t::_failed;
     return verdict_t::_ac;
 }
 void ProgramWrapper::configure_seccomp() {
@@ -482,6 +500,7 @@ void ProgramWrapper::startexe(MyPipe &&in, MyPipe &&out, MyPipe &&err, tm_usage_
     argv.emplace_back(nullptr);
 
     set_mem_lim((mem_lim << 9) * 3);
+    disable_core_dump();
     // rlim.rlim_cur = time_lim/1000+1;
     // rlim.rlim_max = time_lim/1000+2;
     // setrlimit(RLIMIT_CPU, &rlim);
@@ -698,7 +717,7 @@ pid_t UnsafeCodeRunner::start_tracee(MyPipe &inp, MyPipe &outp, tm_usage_t time_
         jl::prog.println(JLGXY_FMT("Error creating pipe"));
         return -1;
     }
-    auto tracee_pid = mpc::start_process([&] {
+    auto tracee_pid = mpc::start_process([this, &inp, &outp, time_lim, mem_lim, &args] {
         prog_.startexe(std::move(inp), std::move(outp), null_pipe(), time_lim, mem_lim, args);
     });
     if (tracee_pid == -1) {
@@ -784,6 +803,7 @@ result_t UnsafeCodeRunner::run_interactive(int /* id */, tm_usage_t time_lim, me
         outp.close();
         rusage usage;
         int status = tracer.tracerwork(prog_pid, time_lim, mem_lim, usage);
+        if (WIFSIGNALED(status)) exit(1);
         exit(WEXITSTATUS(status));
     });
 

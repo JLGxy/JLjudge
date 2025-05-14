@@ -132,11 +132,11 @@ output_file: foo.out  # 选手代码的输出文件名
 
 # 题目数据文件夹中需要有 my_checker.cpp
 checker: my_checker
-checker_compiler: g++
+checker_compiler: gcc-c++14
 
 # 对于 IO 交互题，还需要
 # interactor: interactor
-# interactor_compiler: g++
+# interactor_compiler: gcc-c++14
 
 testcases:
   -

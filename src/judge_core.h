@@ -127,6 +127,8 @@ struct subtask_conf_t {
     double tot_score;
     std::vector<int> testcases;
     scoring_t scoring;
+    std::vector<int> pre;
+    double punish{};
 
     subtask_conf_t() = default;
     subtask_conf_t(subtask_conf_t &&) noexcept = default;
