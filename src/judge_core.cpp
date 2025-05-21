@@ -26,13 +26,13 @@
 #include <csignal>
 #include <cstddef>
 #include <cstdlib>
-#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <initializer_list>
 #include <iterator>
 #include <optional>
+#include <queue>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -48,8 +48,9 @@ namespace jlgxy {
 
 std::string verdict_to_str(verdict_t ver) {
     switch (ver) {
-        case verdict_t::_canceled: return "_canceled";
-        case verdict_t::_failed: return "_failed";
+        case verdict_t::_skp: return "_skp";
+        case verdict_t::_can: return "_can";
+        case verdict_t::_fail: return "_fail";
         case verdict_t::_ac: return "_ac";
         case verdict_t::_ce: return "_ce";
         case verdict_t::_wa: return "_wa";
@@ -66,8 +67,9 @@ std::string verdict_to_str(verdict_t ver) {
 }
 std::string verdict_to_str_sjlac(verdict_t ver) {
     switch (ver) {
-        case verdict_t::_canceled: return "Canceled";
-        case verdict_t::_failed: return "Failed";
+        case verdict_t::_skp: return "Skipped";
+        case verdict_t::_can: return "Canceled";
+        case verdict_t::_fail: return "Failed";
         case verdict_t::_ac: return "Accepted";
         case verdict_t::_ce: return "Compile Error";
         case verdict_t::_wa: return "Wrong Answer";
@@ -84,8 +86,9 @@ std::string verdict_to_str_sjlac(verdict_t ver) {
 }
 std::string verdict_to_str_short(verdict_t ver) {
     switch (ver) {
-        case verdict_t::_canceled: return "CANCL";
-        case verdict_t::_failed: return "FAIL";
+        case verdict_t::_skp: return "SKIP";
+        case verdict_t::_can: return "CANCL";
+        case verdict_t::_fail: return "FAIL";
         case verdict_t::_ac: return "AC";
         case verdict_t::_ce: return "CE";
         case verdict_t::_wa: return "WA";
@@ -117,6 +120,95 @@ bool testcase_conf_t::is_valid() const {
     if (!is_valid_token(input_file)) return false;
     if (!is_valid_token(answer_file)) return false;
     return true;
+}
+
+void SubtaskDependencies::Tarjan::tarjan(int p) {
+    st_.emplace_back(p);
+    ins_[p] = true;
+    dfn_[p] = low_[p] = ++dcnt_;
+    for (auto q : dag_[p]) {
+        if (!dfn_[q]) {
+            tarjan(q);
+            low_[p] = std::min(low_[p], low_[q]);
+        } else if (ins_[q]) {
+            low_[p] = std::min(low_[p], dfn_[q]);
+        }
+    }
+    if (low_[p] >= dfn_[p]) {
+        int lst;
+        scc_.emplace_back();
+        do {
+            lst = st_.back();
+            st_.pop_back();
+            ins_[lst] = false;
+            col_[lst] = scnt_;
+            scc_.back().emplace_back(lst);
+        } while (lst != p);
+        scnt_++;
+    }
+}
+
+void SubtaskDependencies::Tarjan::run() {
+    for (std::size_t i = 0; i < dag_.size(); i++) {
+        if (!dfn_[i]) tarjan(static_cast<int>(i));
+    }
+    // for (std::size_t i = 0; i < dag_.size(); i++) std::cerr << "col: " << col_[i] << std::endl;
+    // for (int i = 0; i < scnt_; i++) {
+    //     std::cerr << "scc: ";
+    //     for (auto j : scc_[i]) std::cerr << j << " ";
+    //     std::cerr << std::endl;
+    // }
+}
+
+void SubtaskDependencies::get_order() {
+    const auto n = dag_.size();
+    Tarjan tj(dag_);
+    tj.run();
+    vvi g(tj.cols());
+    std::vector<int> in(tj.cols());
+    for (std::size_t i = 0; i < n; i++) {
+        for (auto j : dag_[i]) {
+            if (tj.col(i) != tj.col(j)) {
+                g[tj.col(i)].emplace_back(tj.col(j));
+                in[tj.col(j)]++;
+            }
+        }
+    }
+    for (auto &sp : tj.scc_) std::sort(sp.begin(), sp.end());
+    auto comp_scc = [&](int a, int b) { return tj.scc_[a].front() > tj.scc_[b].front(); };
+    std::priority_queue<int, std::vector<int>, std::function<bool(int, int)>> que(comp_scc);
+    for (std::size_t i = 0; i < tj.cols(); i++) {
+        if (!in[i]) que.emplace(i);
+    }
+    std::vector<int> scc_order;
+    while (!que.empty()) {
+        int p = que.top();
+        que.pop();
+        scc_order.emplace_back(p);
+        for (auto u : g[p]) {
+            if (!--in[u]) que.emplace(u);
+        }
+    }
+    for (auto sccid : scc_order) {
+        for (auto p : tj.scc_[sccid]) {
+            order_.emplace_back(p);
+        }
+    }
+}
+
+void SubtaskDependencies::get_prevs() {
+    const auto n = dag_.size();
+    for (std::size_t i = 0; i < n; i++) dep_[i][i] = true;
+    for (std::size_t i = 0; i < n; i++) {
+        for (auto j : dag_[i]) {
+            dep_[j][i] = true;
+        }
+    }
+    for (std::size_t i = 0; i < n; i++) {
+        for (std::size_t j = 0; j < n; j++) {
+            if (dep_[j][i]) dep_[j] |= dep_[i];
+        }
+    }
 }
 
 bool conf_t::is_valid() const {
@@ -157,10 +249,11 @@ scores_t list_result_t::calc_score(const conf_t &conf) const {
     if (!has_started) {
         ret.scores = {0};
         ret.score = 0;
-        ret.final_verdict = results.empty() ? verdict_t::_failed : results[0].res;
+        ret.final_verdict = results.empty() ? verdict_t::_fail : results[0].res;
         return ret;
     }
-    std::deque<bool> sub_ac;
+    std::vector<bool> sub_ac;
+    sub_ac.reserve(conf.subtask_conf.size());
     for (const auto &subtask : conf.subtask_conf) {
         sub_ac.emplace_back(std::all_of(subtask.testcases.begin(), subtask.testcases.end(),
                                         [&](int tc) { return results[tc].res == verdict_t::_ac; }));
@@ -425,7 +518,7 @@ verdict_t ProgramWrapper::compile(const Compiler &compc, const fs::path &tempdir
 
         if (ppid < 0) {
             jl::prog.println(JLGXY_FMT("Error while forking"));
-            exit(static_cast<int>(verdict_t::_failed));
+            exit(static_cast<int>(verdict_t::_fail));
         }
 
         settimer(ppid);
@@ -455,10 +548,10 @@ verdict_t ProgramWrapper::compile(const Compiler &compc, const fs::path &tempdir
     });
     if (proc.failed()) {
         jl::prog.println(JLGXY_FMT("Error while forking"));
-        return verdict_t::_failed;
+        return verdict_t::_fail;
     }
     proc.join();
-    if (proc.if_signaled() || proc.exit_status() != 0) return verdict_t::_failed;
+    if (proc.if_signaled() || proc.exit_status() != 0) return verdict_t::_fail;
     return verdict_t::_ac;
 }
 void ProgramWrapper::configure_seccomp() {
@@ -824,7 +917,7 @@ verdict_t compile_to(const fs::path &src, const fs::path &exe, const Compiler &c
     prog.source_ = src;
     prog.executable_ = exe;
     verdict_t comp = prog.compile(compc, tempdir);
-    if (comp == verdict_t::_failed) return verdict_t::_failed;
+    if (comp == verdict_t::_fail) return verdict_t::_fail;
     if (comp == verdict_t::_ce) return verdict_t::_ce;
     if (!fs::is_regular_file(exe)) return verdict_t::_ce;
     // if (access(exe.c_str(), F_OK)) return _ce;
@@ -906,7 +999,9 @@ result_t Judger::run(int id) {
         if (chkres.returnval == 2)
             return {verdict_t::_pe, res.tm_used, res.mem_used, 0.0, res.returnval, resstr};
         if (chkres.returnval == 3)
-            return {verdict_t::_failed, res.tm_used, res.mem_used, 0.0, res.returnval, resstr};
+            return {verdict_t::_fail, res.tm_used, res.mem_used, 0.0, res.returnval, resstr};
+        if (chkres.returnval == 4)
+            return {verdict_t::_pe, res.tm_used, res.mem_used, 0.0, res.returnval, resstr};
         if (chkres.returnval == 7) {
             std::string tempstr = resstr;
             std::size_t pos = tempstr.find(' ');
@@ -917,15 +1012,16 @@ result_t Judger::run(int id) {
             return {score >= 1.0 ? verdict_t::_ac : verdict_t::_wa,
                     res.tm_used,
                     res.mem_used,
-                    score,
+                    std::max(std::min(score, 1.0), 0.0),
                     res.returnval,
                     resstr};
         }
-        return {verdict_t::_failed, res.tm_used, res.mem_used, 0.0, res.returnval, "spj error"};
+        return {verdict_t::_fail, res.tm_used, res.mem_used, 0.0, res.returnval, "spj error"};
     }
     return res;
 }
-list_result_t Judger::run_all(int /* tot_pt */, const fs::path &source, bool compiled) {
+std::optional<list_result_t> Judger::prepare_run(int /* tot_pt */, const fs::path &source,
+                                                 bool compiled) {
     int tot_pt = static_cast<int>(config_.testcase_conf.size());
     assert(tot_pt > 0);
     assert(config_.is_valid());
@@ -935,23 +1031,23 @@ list_result_t Judger::run_all(int /* tot_pt */, const fs::path &source, bool com
     runner_.validoutputs_ = {config_.output_file};
     if (!compiled) {
         auto [found, compc] = find_compiler_by_file(config_.compiler, source);
-        if (!found) return {_ce_r};
+        if (!found) return list_result_t{_ce_r};
         verdict_t comp = runner_.prog_.compile(*compc, tempdir);
-        if (comp == verdict_t::_failed) return {_failed_r};
-        if (comp == verdict_t::_ce) return {_ce_r};
+        if (comp == verdict_t::_fail) return list_result_t{_failed_r};
+        if (comp == verdict_t::_ce) return list_result_t{_ce_r};
     }
     if (access("./jljudge_main", F_OK)) {
-        return {_ce_r};
+        return list_result_t{_ce_r};
     }
     chkrunner_.prog_.source_ = config_.checker + ".cpp";
     chkrunner_.prog_.executable_ = "./jljudge_checker";
     if (!compiled) {
         verdict_t compchk = chkrunner_.prog_.compile(*config_.checker_compiler, tempdir);
-        if (compchk == verdict_t::_failed) return {_failed_r};
-        if (compchk == verdict_t::_ce) return {_ce_r};
+        if (compchk == verdict_t::_fail) return list_result_t{_failed_r};
+        if (compchk == verdict_t::_ce) return list_result_t{_ce_r};
     }
     if (access("./jljudge_checker", F_OK)) {
-        return {_failed_r};
+        return list_result_t{_failed_r};
     }
     if (config_.is_interactive) {
         runner_.inter_prog_.source_ = config_.interactor + ".cpp";
@@ -959,18 +1055,51 @@ list_result_t Judger::run_all(int /* tot_pt */, const fs::path &source, bool com
         if (!compiled) {
             verdict_t compinter =
                     runner_.inter_prog_.compile(*config_.interactor_compiler, tempdir);
-            if (compinter == verdict_t::_failed) return {_failed_r};
-            if (compinter == verdict_t::_ce) return {_ce_r};
+            if (compinter == verdict_t::_fail) return list_result_t{_failed_r};
+            if (compinter == verdict_t::_ce) return list_result_t{_ce_r};
         }
         if (access("./jljudge_interactor", F_OK)) {
-            return {_failed_r};
+            return list_result_t{_failed_r};
         }
     }
+    return std::nullopt;
+}
+
+list_result_t Judger::run_all(int /* tot_pt */, const fs::path &source, bool compiled) {
+    int tot_pt = static_cast<int>(config_.testcase_conf.size());
+    auto prep = prepare_run(tot_pt, source, compiled);
+    if (prep.has_value()) return std::move(prep.value());
     list_result_t ans{};
     ans.has_started = true;
     for (int id = 0; id < tot_pt; id++) {
         result_t ver = run(id);
         ans.results.emplace_back(ver);
+    }
+    return ans;
+}
+list_result_t Judger::run_all_ordered(int /* tot_pt */, const fs::path &source, bool compiled) {
+    int tot_pt = static_cast<int>(config_.testcase_conf.size());
+    auto prep = prepare_run(tot_pt, source, compiled);
+    if (prep.has_value()) return std::move(prep.value());
+    list_result_t ans{};
+    ans.has_started = true;
+    ans.results.resize(tot_pt, _wt_r);
+    boost::dynamic_bitset<> subtask_failed(config_.subtask_conf.size());
+    for (auto sub : config_.dep->order_) {
+        const auto &sub_conf = config_.subtask_conf[sub];
+        if ((config_.dep->dep_[sub] & subtask_failed).any()) continue;
+        bool sub_pass = true;
+        double min_score = 1.0;
+        for (auto pt : sub_conf.testcases) {
+            if (ans.results[pt].res == verdict_t::_wt) ans.results[pt] = run(pt);
+            if (ans.results[pt].res != verdict_t::_ac) sub_pass = false;
+            min_score = std::min(min_score, ans.results[pt].score);
+            if (sub_conf.scoring == scoring_t::_c_min && !sub_pass && min_score <= 0) break;
+        }
+        if (!sub_pass) subtask_failed.set(sub);
+    }
+    for (auto &res : ans.results) {
+        if (res.res == verdict_t::_wt) res = _skp_r;
     }
     return ans;
 }

@@ -8,11 +8,13 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#include <boost/dynamic_bitset.hpp>
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
 #include <initializer_list>
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <random>
 #include <sstream>
@@ -44,8 +46,9 @@ namespace mpc = multiproc;
 namespace fs = std::filesystem;
 
 enum class verdict_t : std::int8_t {
-    _canceled = -2,
-    _failed = -1,
+    _skp = -3,
+    _can = -2,
+    _fail = -1,
     _ac = 0,
     _ce = 1,
     _wa = 2,
@@ -139,6 +142,49 @@ struct subtask_conf_t {
 
 class Compiler;
 
+class SubtaskDependencies {
+  public:
+    using vvi = std::vector<std::vector<int>>;
+    using vb = std::vector<boost::dynamic_bitset<>>;
+
+    vvi dag_;
+    std::vector<int> order_;
+    vb dep_;
+
+    explicit SubtaskDependencies(int n) : dag_(n), dep_(n, boost::dynamic_bitset<>(n)) {}
+
+    void init() {
+        get_order();
+        get_prevs();
+    }
+
+  private:
+    class Tarjan {
+      public:
+        vvi scc_;
+        void tarjan(int p);
+        void run();
+        explicit Tarjan(const vvi &graph)
+                : dag_(graph),
+                  dfn_(graph.size()),
+                  low_(graph.size()),
+                  col_(graph.size()),
+                  ins_(graph.size()) {}
+
+        std::size_t cols() const { return scnt_; }
+        int col(std::size_t idx) const { return col_[idx]; }
+
+      private:
+        const vvi &dag_;
+        std::vector<int> dfn_, low_, st_, col_;
+        std::vector<bool> ins_;
+        int dcnt_{}, scnt_{};
+    };
+
+    void get_order();
+    void get_prevs();
+};
+
 // Config of the problem
 struct conf_t {
     std::vector<testcase_conf_t> testcase_conf;
@@ -152,6 +198,8 @@ struct conf_t {
     std::string interactor;
     const Compiler *interactor_compiler;
     bool has_subtasks;
+
+    std::unique_ptr<SubtaskDependencies> dep;
 
     conf_t() = default;
     conf_t(conf_t &&) noexcept = default;
@@ -193,8 +241,10 @@ struct list_result_t {
     tm_usage_t get_total_tm() const;
 };
 
-const result_t _failed_r = result_t(verdict_t::_failed, 0, 0, 0, _int_nan, "");
+const result_t _failed_r = result_t(verdict_t::_fail, 0, 0, 0, _int_nan, "");
 const result_t _ce_r = result_t(verdict_t::_ce, 0, 0, 0, _int_nan, "");
+const result_t _wt_r = result_t(verdict_t::_wt, 0, 0, 0, _int_nan, "");
+const result_t _skp_r = result_t(verdict_t::_skp, 0, 0, 0, _int_nan, "");
 
 inline void copy_file(const fs::path &src, const fs::path &dst) {
     if (!fs::is_regular_file(src)) return;
@@ -450,7 +500,10 @@ class Judger {
     int get_output(int /* id */) const;
 
     result_t run(int id);
+    std::optional<list_result_t> prepare_run(int /* tot_pt */, const fs::path &source,
+                                             bool compiled = false);
     list_result_t run_all(int /* tot_pt */, const fs::path &source, bool compiled = false);
+    list_result_t run_all_ordered(int /* tot_pt */, const fs::path &source, bool compiled = false);
 };
 
 }  // namespace jlgxy

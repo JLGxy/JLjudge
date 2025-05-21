@@ -82,7 +82,7 @@ list_result_t JudgeOne::run(const fs::path &code_file, const conf_t &config) con
         fs::current_path(cur_dir);
         return {_failed_r};
     }
-    list_result_t ress = judge.run_all(0, "", true);
+    list_result_t ress = judge.run_all_ordered(0, "", true);
     fs::current_path(cur_dir);
 
     return ress;
@@ -826,6 +826,14 @@ std::tuple<bool, const Compiler *, fs::path> JudgeAll::find_code_at(const fs::pa
     return {false, nullptr, fs::path()};
 }
 
+namespace {
+template <typename T>
+void remove_duplicated(std::vector<T> &v) {
+    std::sort(v.begin(), v.end());
+    v.erase(std::unique(v.begin(), v.end()), v.end());
+}
+}  // namespace
+
 void JudgeAll::read_config(const fs::path &conf_file, conf_t &conf) const {
     conf = conf_t();
     std::ifstream conf_stream(conf_file);
@@ -883,11 +891,13 @@ void JudgeAll::read_config(const fs::path &conf_file, conf_t &conf) const {
             for (auto it = tc_nodes.begin(); it != tc_nodes.end(); ++it) {
                 cur_conf.testcases.emplace_back(it->as<int>() - 1);
             }
+            remove_duplicated(cur_conf.testcases);
             const auto &&pre_node = cur_node["pre"];
             if (pre_node) {
                 for (auto k : pre_node) {
-                    cur_conf.pre.emplace_back(k.as<int>());
+                    cur_conf.pre.emplace_back(k.as<int>() - 1);
                 }
+                remove_duplicated(cur_conf.pre);
             }
             if (cur_node["punishment"]) {
                 cur_conf.punish = cur_node["punishment"].as<double>();
@@ -901,6 +911,14 @@ void JudgeAll::read_config(const fs::path &conf_file, conf_t &conf) const {
             cur_conf.testcases.emplace_back(i);
         }
     }
+
+    conf.dep = std::make_unique<SubtaskDependencies>(conf.subtask_conf.size());
+    for (size_t i = 0; i < conf.subtask_conf.size(); i++) {
+        for (auto u : conf.subtask_conf[i].pre) {
+            conf.dep->dag_[u].emplace_back(i);
+        }
+    }
+    conf.dep->init();
 }
 
 void JudgeAll::check_valid() const {
