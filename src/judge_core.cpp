@@ -252,18 +252,22 @@ scores_t list_result_t::calc_score(const conf_t &conf) const {
         ret.final_verdict = results.empty() ? verdict_t::_fail : results[0].res;
         return ret;
     }
-    std::vector<bool> sub_ac;
-    sub_ac.reserve(conf.subtask_conf.size());
+    auto sub_num = conf.subtask_conf.size();
+    boost::dynamic_bitset<> sub_passed, pre_passed;
+    sub_passed.reserve(sub_num);
     for (const auto &subtask : conf.subtask_conf) {
-        sub_ac.emplace_back(std::all_of(subtask.testcases.begin(), subtask.testcases.end(),
-                                        [&](int tc) { return results[tc].res == verdict_t::_ac; }));
+        sub_passed.push_back(
+                std::all_of(subtask.testcases.begin(), subtask.testcases.end(),
+                            [&](int tc) { return results[tc].res == verdict_t::_ac; }));
     }
-    int sub_id = 0;
+    pre_passed.reserve(sub_num);
+    for (std::size_t i = 0; i < sub_num; i++) {
+        pre_passed.push_back((sub_passed & conf.dep->dep_[i]).set(i) == conf.dep->dep_[i]);
+    }
+    int sub_id = -1;
     for (const auto &sub : conf.subtask_conf) {
         ++sub_id;
-        bool pre_passed =
-                std::all_of(sub.pre.begin(), sub.pre.end(), [&](int st) { return sub_ac[st]; });
-        if (!pre_passed) {
+        if (!pre_passed[sub_id]) {
             ret.scores.emplace_back(0);
             continue;
         }
@@ -282,7 +286,7 @@ scores_t list_result_t::calc_score(const conf_t &conf) const {
             throw std::runtime_error("unknown scoring method");
         }
         cur *= sub.tot_score;
-        if (!sub_ac[sub_id - 1]) cur += sub.punish;
+        if (!sub_passed[sub_id]) cur += sub.punish;
         ret.scores.emplace_back(cur);
     }
     ret.score = 0;
