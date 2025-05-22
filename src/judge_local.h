@@ -405,8 +405,8 @@ class JudgeAll {
 
     static std::pair<double, double> calc_sd(const std::vector<double> &s);
 
-    void export_bests(std::size_t best_cnt = 5) const;
-    void export_stats(std::size_t best_cnt = 5) const;
+    void export_bests(std::size_t best_cnt) const;
+    void export_stats(std::size_t best_cnt) const;
 
   private:
     const std::string rstr_;
@@ -459,13 +459,27 @@ class JudgeAll {
     std::string generate_html() const;
 };
 
-class CliRunner {
+// class CliRunner {
+//   public:
+//     static void err_usage();
+//     static void err_newprob_usage();
+//     static void newprob(int argc, char **argv);
+//     static int try_run(int argc, char **argv);
+//     static int run(int argc, char **argv);
+// };
+
+namespace cli {
+
+class CliHandler {
   public:
-    static void err_usage();
-    static void err_newprob_usage();
-    static void newprob(int argc, char **argv);
-    static int try_run(int argc, char **argv);
-    static int run(int argc, char **argv);
+    int run(int argc, char **argv);
+
+  private:
+    po::CommandHandler handler_;
+
+    int run_throw(int argc, char **argv);
 };
+
+}  // namespace cli
 
 }  // namespace jlgxy

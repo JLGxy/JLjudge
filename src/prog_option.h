@@ -1,12 +1,13 @@
 #pragma once
 
 #include <algorithm>
+#include <concepts>
 #include <exception>
-#include <functional>
 #include <iostream>
 #include <limits>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -15,6 +16,8 @@
 #include "judge_logs.h"
 
 namespace jlgxy::po {
+
+using strvec = std::vector<std::string>;
 
 constexpr auto _size_inf = std::numeric_limits<std::size_t>::max();
 
@@ -53,6 +56,8 @@ class Parser {
 
     template <typename T>
     T get(std::string_view, const std::optional<T> & = std::nullopt) = delete;
+    template <std::integral T>
+    T get(std::string_view, const std::optional<T> & = std::nullopt);
 
     void show_usage() {
         std::cerr << "Usage:" << " ";
@@ -82,7 +87,7 @@ class Parser {
     }
 
     void parse_check(int argc, char **argv) {
-        std::vector<std::string> argvec;
+        strvec argvec;
         argvec.reserve(argc);
         for (int i = 0; i < argc; i++) argvec.emplace_back(argv[i]);
         for (int i = 1; i < argc; i++) {
@@ -114,7 +119,7 @@ class Parser {
         auto add_only = [&find_opt](std::vector<option_value> &v, const option &opt) {
             auto it = find_opt(v, opt);
             if (it == v.end()) {
-                v.emplace_back(opt, std::vector<std::string>{});
+                v.emplace_back(opt, strvec{});
             }
         };
 
@@ -146,7 +151,7 @@ class Parser {
             }
         }
         for (const auto &[opt, arg] : args_) {
-            if (arg.size() < opt.min_cnt || arg.size() > opt.min_cnt)
+            if (arg.size() < opt.min_cnt || arg.size() > opt.max_cnt)
                 throw InvalidArg(fmt::format(
                         JLGXY_FMT("invalid number of argument for {}, expect [{},{}], got {}"),
                         opt.name, opt.min_cnt, opt.max_cnt, arg.size()));
@@ -184,7 +189,7 @@ class Parser {
                   max_cnt(max_c) {}
     };
 
-    using option_value = std::pair<const option &, std::vector<std::string>>;
+    using option_value = std::pair<const option &, strvec>;
 
     std::string name_str_, version_str_;
     std::vector<option> opt_vector_;
@@ -238,11 +243,11 @@ inline std::string Parser::get<std::string>(std::string_view name,
     }
 }
 
-// find such argument and return in std::vector<std::string>. if there's no such argument, return
+// find such argument and return in strvec. if there's no such argument, return
 // `default_value` if given or throw if not.
 template <>
-inline std::vector<std::string> Parser::get<std::vector<std::string>>(
-        std::string_view name, const std::optional<std::vector<std::string>> &default_value) {
+inline strvec Parser::get<strvec>(std::string_view name,
+                                  const std::optional<strvec> &default_value) {
     try {
         const auto &val = get_value_by_name(name);
         return val.second;
@@ -252,18 +257,50 @@ inline std::vector<std::string> Parser::get<std::vector<std::string>>(
     }
 }
 
+template <std::integral T>
+inline T to_int(std::string_view s) {
+    std::istringstream ss(std::string{s});
+    T ret;
+    ss >> ret;
+    return ret;
+}
+
+template <std::integral T>
+inline T Parser::get(std::string_view name, const std::optional<T> &default_value) {
+    try {
+        const auto &val = get_value_by_name(name);
+        if (val.second.size() != 1)
+            throw InvalidArg(fmt::format(JLGXY_FMT("expected 1 argument for {}, got {}"), name,
+                                         val.second.size()));
+        return to_int<T>(val.second.front());
+    } catch (ArgNotFound &e) {
+        if (default_value.has_value()) return default_value.value();
+        throw e;
+    }
+}
+
+class CommandBase {
+  public:
+    virtual ~CommandBase() = default;
+    virtual std::string_view get_name() = 0;
+    virtual std::string_view get_desc() = 0;
+    virtual void init_parser() = 0;
+    virtual int run() = 0;
+    Parser parser;
+};
+
 class CommandHandler {
   public:
-    void add_command(const std::string_view cmd, Parser parser, const std::string_view desc,
-                     const std::function<int(po::Parser &)> &callback) {
-        cmd_vector_.emplace_back(std::string(cmd), std::move(parser), desc, callback);
+    void add_command(std::unique_ptr<CommandBase> ptr) {
+        ptr->init_parser();
+        cmd_vector_.emplace_back(std::move(ptr));
     }
 
     void show_usage() const {
         std::cerr << "Usage: " << name_str_ << " [command] [options]" << std::endl;
         std::cerr << "Commands:" << std::endl;
-        for (const auto &[cmd, psr, desc, call] : cmd_vector_) {
-            std::cerr << "  " << cmd << std::endl;
+        for (const auto &cmd : cmd_vector_) {
+            std::cerr << "  " << cmd->get_name() << std::endl;
         }
         exit(1);
     }
@@ -276,13 +313,15 @@ class CommandHandler {
     std::pair<std::string, int> parse(int argc, char **argv) {
         if (argc <= 1) show_usage();
         std::string_view tcmd = argv[1];
-        auto it = std::find_if(cmd_vector_.begin(), cmd_vector_.end(),
-                               [&](const subcmd &cmd) { return cmd.name == tcmd; });
+        auto it = std::find_if(
+                cmd_vector_.begin(), cmd_vector_.end(),
+                [&](const std::unique_ptr<CommandBase> &cmd) { return cmd->get_name() == tcmd; });
         if (it == cmd_vector_.end()) {
             throw NotExist("unknown command `" + std::string{tcmd} + "`");
         }
-        it->parser.parse_check(argc - 1, argv + 1);
-        return {it->name, it->call(it->parser)};
+        auto &ptr = *it;
+        ptr->parser.parse_check(argc - 1, argv + 1);
+        return {std::string{ptr->get_name()}, ptr->run()};
     }
 
     void set_name(std::string_view name, std::string_view version) {
@@ -291,20 +330,8 @@ class CommandHandler {
     }
 
   private:
-    struct subcmd {
-        std::string name;
-        Parser parser;
-        std::string desc;
-        std::function<int(po::Parser &)> call;
-        subcmd(std::string_view name_, Parser parser_, std::string_view descr_,
-               std::function<int(po::Parser &)> callback)
-                : name(name_),
-                  parser(std::move(parser_)),
-                  desc(descr_),
-                  call(std::move(callback)) {}
-    };
     std::string name_str_, version_str_;
-    std::vector<subcmd> cmd_vector_;
+    std::vector<std::unique_ptr<CommandBase>> cmd_vector_;
 };
 
 }  // namespace jlgxy::po

@@ -24,6 +24,7 @@
 #include <string_view>
 #include <thread>
 #include <tuple>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -1051,7 +1052,7 @@ void JudgeAll::get_user_compile_list() {
 void JudgeAll::inc_compile_progress() {
     std::lock_guard guard(compile_list_lock_);
     tot_compiled_++;
-    jl::prog.println("compiled: {} out of {}", tot_compiled_, tot_compile_task_);
+    jl::prog.println(JLGXY_FMT("compiled: {} out of {}"), tot_compiled_, tot_compile_task_);
     prop_ = base_prop_ + cur_prop_ * tot_compiled_ / tot_compile_task_;
     jl::prog.setprogress(prop_);
 }
@@ -1248,119 +1249,141 @@ std::string JudgeAll::generate_html() const {
     return html;
 }
 
-void CliRunner::err_usage() {
-    jl::prog.println(JLGXY_FMT("Usage: judgecli <command> [options]"));
-    jl::prog.println(JLGXY_FMT("Commands:"));
-    jl::prog.println(JLGXY_FMT("  new           create contest or problem directories"));
-    jl::prog.println(JLGXY_FMT("  export        export judgement result"));
-    jl::prog.println(JLGXY_FMT("  judge         judge sources"));
-    jl::prog.println(JLGXY_FMT("  rejudge       rejudge sources"));
-    jl::prog.println(JLGXY_FMT("  version       print version"));
-    exit(1);
-}
-void CliRunner::err_newprob_usage() {
-    jl::prog.println(JLGXY_FMT("Usage: judgecli new <type> <name>"));
-    jl::prog.println(JLGXY_FMT("Types:"));
-    jl::prog.println(JLGXY_FMT(
-            "  contest       create a directory <name> and initialize an empty contest."));
-    jl::prog.println(
-            JLGXY_FMT("  problem       create a problem <name> with default configuration."));
-    exit(1);
-}
-void CliRunner::newprob(int argc, char **argv) {
-    if (argc != 4) {
-        err_newprob_usage();
-    }
-    std::string name = argv[3];
-    if (strcmp(argv[2], "contest") == 0) {
-        if (name.find('/') != std::string::npos) {
-            jl::prog.println(JLGXY_FMT("{}"), JudgeError("contest name can't contain '/'").what());
-            exit(2);
-        }
-        fs::path cp(name);
-        if (fs::exists(cp)) {
-            jl::prog.println(JLGXY_FMT("{}"),
-                             JudgeError("file or directory already exists").what());
-            exit(2);
-        }
-        fs::create_directory(cp);
-        fs::create_directory(cp / ".jljudge");
-        fs::create_directory(cp / "data");
-        fs::create_directory(cp / "sources");
-        std::ofstream(cp / "data" / "contest.yaml") << _contest_config_template;
-    } else if (strcmp(argv[2], "problem") == 0) {
-        if (name.find('/') != std::string::npos) {
-            jl::prog.println(JLGXY_FMT("{}"), JudgeError("problem name can't contain '/'").what());
-            exit(2);
-        }
-        if (!fs::is_directory("data")) {
-            jl::prog.println(JLGXY_FMT("{}"),
-                             JudgeError("can't create problem outside a contest directory").what());
-            exit(2);
-        }
-        auto cp = fs::path("data") / name;
-        if (fs::exists(cp)) {
-            jl::prog.println(JLGXY_FMT("{}"),
-                             JudgeError("file or directory already exists").what());
-            exit(2);
-        }
-        fs::create_directory(cp);
-        std::ofstream(cp / "conf.yaml") << fmt::format(JLGXY_FMT(_problem_config_template), name);
-        std::ofstream(cp / "my_checker.cpp") << fmt::format(JLGXY_FMT(_problem_checker_template));
-    } else {
-        err_newprob_usage();
-    }
-    exit(0);
-}
-int CliRunner::try_run(int argc, char **argv) {
-    if (argc < 2) err_usage();
+namespace cli {
 
-    if (strcmp(argv[1], "new") == 0) {
-        newprob(argc, argv);
-    }
-    if (strcmp(argv[1], "version") == 0) {
+using po::strvec;
+
+class ShowVersion : public po::CommandBase {
+    std::string_view get_name() override { return "version"; }
+    std::string_view get_desc() override { return "show version"; }
+    void init_parser() override {}
+    int run() override {
         jl::prog.println(JLGXY_FMT("JLjudge version {} build {}"), JLGXY_VERSION,
                          JLGXY_VERSION_BUILD);
         return 0;
     }
+};
 
-    jlgxy::JudgeAll judgeall(fs::current_path() / "data", fs::current_path() / "sources",
-                             fs::current_path() / ".jljudge" / "temp");
-    judgeall.load_compilers();
-    if (strcmp(argv[1], "rejudge") == 0) {
-        judgeall.subs.loads_from_args(argc - 2, argv + 2);
+class Judge : public po::CommandBase {
+  public:
+    std::string_view get_name() override { return "judge"; }
+    std::string_view get_desc() override { return "judge submissions"; }
+    void init_parser() override {
+        parser.add("add", 'a', "add submissions to judge", true, 0, _size_inf);
+    }
+    int run() override {
+        jlgxy::JudgeAll judgeall(fs::current_path() / "data", fs::current_path() / "sources",
+                                 fs::current_path() / ".jljudge" / "temp");
+        judgeall.load_compilers();
+        judgeall.subs.loads_from_args(parser.get<strvec>("add", strvec{}));
+        judgeall.judge_main();
+        return 0;
+    }
+};
+
+class Rejudge : public po::CommandBase {
+  public:
+    std::string_view get_name() override { return "rejudge"; }
+    std::string_view get_desc() override { return "rejudge submissions"; }
+    void init_parser() override {
+        parser.add("add", 'a', "add submissions to judge", true, 0, _size_inf);
+    }
+    int run() override {
+        jlgxy::JudgeAll judgeall(fs::current_path() / "data", fs::current_path() / "sources",
+                                 fs::current_path() / ".jljudge" / "temp");
+        judgeall.load_compilers();
+        judgeall.subs.loads_from_args(parser.get<strvec>("add", strvec{}));
         judgeall.load_probs();
         judgeall.load_project();
         judgeall.remove_range();
         judgeall.judge_main();
         return 0;
     }
-    if (strcmp(argv[1], "judge") == 0) {
-        judgeall.subs.loads_from_args(argc - 2, argv + 2);
-        judgeall.judge_main();
-        jl::prog.println("finish, pid={}", getpid());
+};
+
+class CreateTemplate : public po::CommandBase {
+    std::string_view get_name() override { return "new"; }
+    std::string_view get_desc() override { return "create empty problem/contest"; }
+    void init_parser() override {
+        parser.add("type", 't', "type", false, 1, 1);
+        parser.add("name", 'n', "name", false, 1, 1);
+    }
+    int run() override {
+        std::string type = parser.get<std::string>("type");
+        std::string name = parser.get<std::string>("name");
+        if (type == "contest") {
+            if (name.find('/') != std::string::npos) {
+                jl::prog.println(JLGXY_FMT("{}"),
+                                 JudgeError("contest name can't contain '/'").what());
+                return 2;
+            }
+            fs::path cp(name);
+            if (fs::exists(cp)) {
+                jl::prog.println(JLGXY_FMT("{}"),
+                                 JudgeError("file or directory already exists").what());
+                return 2;
+            }
+            fs::create_directory(cp);
+            fs::create_directory(cp / ".jljudge");
+            fs::create_directory(cp / "data");
+            fs::create_directory(cp / "sources");
+            std::ofstream(cp / "data" / "contest.yaml") << _contest_config_template;
+        } else if (type == "problem") {
+            if (name.find('/') != std::string::npos) {
+                jl::prog.println(JLGXY_FMT("{}"),
+                                 JudgeError("problem name can't contain '/'").what());
+                return 2;
+            }
+            if (!fs::is_directory("data")) {
+                jl::prog.println(
+                        JLGXY_FMT("{}"),
+                        JudgeError("can't create problem outside a contest directory").what());
+                return 2;
+            }
+            auto cp = fs::path("data") / name;
+            if (fs::exists(cp)) {
+                jl::prog.println(JLGXY_FMT("{}"),
+                                 JudgeError("file or directory already exists").what());
+                return 2;
+            }
+            fs::create_directory(cp);
+            std::ofstream(cp / "conf.yaml")
+                    << fmt::format(JLGXY_FMT(_problem_config_template), name);
+            std::ofstream(cp / "my_checker.cpp")
+                    << fmt::format(JLGXY_FMT(_problem_checker_template));
+        } else {
+            jl::prog.println(JLGXY_FMT("unknown type string `{}`"), type);
+            return 2;
+        }
         return 0;
     }
-    if (strcmp(argv[1], "export") == 0) {
-        if (argc > 2) err_usage();
+};
+
+class ExportResults : public po::CommandBase {
+    std::string_view get_name() override { return "export"; }
+    std::string_view get_desc() override { return "export judge results"; }
+    void init_parser() override {
+        parser.add("stats", 's', "export statistics", true, 0, 0);
+        parser.add("number", 'n', "nummber of best solutions exported", true, 1, 1);
+    }
+    int run() override {
+        jlgxy::JudgeAll judgeall(fs::current_path() / "data", fs::current_path() / "sources",
+                                 fs::current_path() / ".jljudge" / "temp");
+        judgeall.load_compilers();
         judgeall.load_probs();
         judgeall.load_project();
-        judgeall.export_results();
+        if (parser.get<bool>("stats")) {
+            judgeall.export_bests(parser.get<int>("number", 5));
+        } else {
+            judgeall.export_results();
+        }
         return 0;
     }
-    if (strcmp(argv[1], "stat") == 0) {
-        if (argc > 2) err_usage();
-        judgeall.load_probs();
-        judgeall.load_project();
-        judgeall.export_bests();
-        return 0;
-    }
-    err_usage();
-    return 0;
-}
-int CliRunner::run(int argc, char **argv) {
+};
+
+int CliHandler::run(int argc, char **argv) {
     try {
-        return try_run(argc, argv);
+        return run_throw(argc, argv);
     } catch (std::exception &e) {
         jl::prog.finish();
         jl::prog.println(JLGXY_FMT("{}"), e.what());
@@ -1368,53 +1391,16 @@ int CliRunner::run(int argc, char **argv) {
     }
 }
 
-namespace cli {
+int CliHandler::run_throw(int argc, char **argv) {
+    handler_.add_command(std::make_unique<CreateTemplate>());
+    handler_.add_command(std::make_unique<ShowVersion>());
+    handler_.add_command(std::make_unique<Judge>());
+    handler_.add_command(std::make_unique<Rejudge>());
+    handler_.add_command(std::make_unique<ExportResults>());
+    auto [name, ret] = handler_.parse(argc, argv);
+    return ret;
+}
 
-class Judge {
-  public:
-    constexpr static std::string_view _name = "judge";
-    constexpr static std::string_view _desc = "judge sources";
-    static po::Parser init_parser() {
-        po::Parser p;
-        p.add("add", 'a', "add submissions to judge", true, 0, _size_inf);
-        return p;
-    }
-    static int run(po::Parser &p) {
-        jlgxy::JudgeAll judgeall(fs::current_path() / "data", fs::current_path() / "sources",
-                                 fs::current_path() / ".jljudge" / "temp");
-        judgeall.load_compilers();
-        judgeall.subs.loads_from_args(p.get<std::vector<std::string>>("add"));
-        judgeall.judge_main();
-        return 0;
-    }
-};
-
-class CliHandler {
-  public:
-    int run(int argc, char **argv) {
-        try {
-            return run_throw(argc, argv);
-        } catch (std::exception &e) {
-            jl::prog.finish();
-            jl::prog.println(JLGXY_FMT("{}"), e.what());
-            exit(2);
-        }
-    }
-
-  private:
-    po::CommandHandler handler_;
-
-    int run_throw(int argc, char **argv) {
-        add<Judge>();
-        auto [name, ret] = handler_.parse(argc, argv);
-        return ret;
-    }
-
-    template <typename T>
-    void add() {
-        handler_.add_command(T::_name, T::init_parser(), T::_desc, T::run);
-    }
-};
 }  // namespace cli
 
 }  // namespace jlgxy

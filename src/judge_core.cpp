@@ -571,7 +571,7 @@ void ProgramWrapper::configure_seccomp() {
     for (auto nr : _syscalls_allowed) add_rule(nr, SECCOMP_RET_ALLOW);
     filt.push_back(BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL));
 
-    jl::prog.println("size: {}", filt.size());
+    jl::prog.println(JLGXY_FMT("size: {}"), filt.size());
 
     struct sock_fprog prog = {
             static_cast<unsigned short>(filt.size()),

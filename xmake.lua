@@ -3,7 +3,7 @@ add_rules("mode.debug", "mode.release")
 set_project("jljudge")
 set_version("0.2.0", {build = "%Y%m%d%H%M"})
 
-set_languages("c++17")
+set_languages("c++20")
 
 add_cxxflags("clang::-ftime-trace")
 add_ldflags("-static-libgcc", "-static-libstdc++", {force = true})

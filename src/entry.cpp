@@ -4,4 +4,4 @@
 
 #include "judge_local.h"
 
-int main(int argc, char **argv) { return jlgxy::CliRunner::run(argc, argv); }
+int main(int argc, char **argv) { return jlgxy::cli::CliHandler{}.run(argc, argv); }
