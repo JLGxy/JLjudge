@@ -1,15 +1,16 @@
 #pragma once
 
 #include <algorithm>
-#include <concepts>
+#include <charconv>
 #include <exception>
 #include <iostream>
 #include <limits>
 #include <memory>
 #include <optional>
-#include <sstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -40,6 +41,11 @@ class NotExist : public std::exception {
     const char *what() const noexcept override { return what_str_.c_str(); }
 };
 
+template <typename T>
+concept my_number = requires(T num) {
+    std::from_chars(std::declval<const char *>(), std::declval<const char *>(), num);
+};
+
 class Parser {
   public:
     Parser() = default;
@@ -56,7 +62,7 @@ class Parser {
 
     template <typename T>
     T get(std::string_view, const std::optional<T> & = std::nullopt) = delete;
-    template <std::integral T>
+    template <my_number T>
     T get(std::string_view, const std::optional<T> & = std::nullopt);
 
     void show_usage() {
@@ -102,7 +108,7 @@ class Parser {
         }
 
         auto find_opt = [](std::vector<option_value> &v, const option &opt) {
-            auto it = std::find_if(v.begin(), v.end(), [&](const option_value &pr) {
+            auto it = std::ranges::find_if(v, [&](const option_value &pr) {
                 return std::addressof(pr.first) == std::addressof(opt);
             });
             return it;
@@ -157,10 +163,9 @@ class Parser {
                         opt.name, opt.min_cnt, opt.max_cnt, arg.size()));
         }
         for (auto &opt : opt_vector_) {
-            if (!opt.optional &&
-                std::find_if(args_.begin(), args_.end(), [&](const option_value &arg) {
-                    return std::addressof(arg.first) == std::addressof(opt);
-                }) == args_.end()) {
+            if (!opt.optional && std::ranges::find_if(args_, [&](const option_value &arg) {
+                                     return std::addressof(arg.first) == std::addressof(opt);
+                                 }) == args_.end()) {
                 throw ArgNotFound("missing argument `" + opt.name + "`");
             }
         }
@@ -196,22 +201,21 @@ class Parser {
     std::vector<option_value> args_;
 
     const option &find_option_by_name(std::string_view s) const {
-        auto it = std::find_if(opt_vector_.begin(), opt_vector_.end(),
-                               [&](const option &opt) { return opt.name == s; });
+        auto it =
+                std::ranges::find_if(opt_vector_, [&](const option &opt) { return opt.name == s; });
         if (it == opt_vector_.end()) throw NotExist("no such argument: --" + std::string(s));
         return *it;
     }
 
     const option &find_option_by_short_name(char s) const {
-        auto it = std::find_if(opt_vector_.begin(), opt_vector_.end(),
-                               [&](const option &opt) { return opt.short_name == s; });
+        auto it = std::ranges::find_if(opt_vector_,
+                                       [&](const option &opt) { return opt.short_name == s; });
         if (it == opt_vector_.end()) throw NotExist(std::string("no such argument: -") + s);
         return *it;
     }
     const option_value &get_value_by_name(std::string_view name) {
-        auto it = std::find_if(args_.begin(), args_.end(), [&](const option_value &arg) -> bool {
-            return arg.first.name == name;
-        });
+        auto it = std::ranges::find_if(
+                args_, [&](const option_value &arg) -> bool { return arg.first.name == name; });
         if (it == args_.end()) {
             throw ArgNotFound("not found: " + std::string(name));
         }
@@ -222,8 +226,8 @@ class Parser {
 // if such argument exists, return true, otherwise false.
 template <>
 inline bool Parser::get<bool>(std::string_view name, const std::optional<bool> &) {
-    return std::any_of(args_.begin(), args_.end(),
-                       [&](const option_value &arg) -> bool { return arg.first.name == name; });
+    return std::ranges::any_of(
+            args_, [&](const option_value &arg) -> bool { return arg.first.name == name; });
 }
 
 // find such argument and return in std::string. if there's no such argument, return `default_value`
@@ -257,15 +261,14 @@ inline strvec Parser::get<strvec>(std::string_view name,
     }
 }
 
-template <std::integral T>
+template <my_number T>
 inline T to_int(std::string_view s) {
-    std::istringstream ss(std::string{s});
     T ret;
-    ss >> ret;
-    return ret;
+    if (std::from_chars(s.begin(), s.end(), ret).ec == std::errc{}) return ret;
+    throw std::runtime_error("the string can't be converted to a number");
 }
 
-template <std::integral T>
+template <my_number T>
 inline T Parser::get(std::string_view name, const std::optional<T> &default_value) {
     try {
         const auto &val = get_value_by_name(name);
@@ -313,9 +316,9 @@ class CommandHandler {
     std::pair<std::string, int> parse(int argc, char **argv) {
         if (argc <= 1) show_usage();
         std::string_view tcmd = argv[1];
-        auto it = std::find_if(
-                cmd_vector_.begin(), cmd_vector_.end(),
-                [&](const std::unique_ptr<CommandBase> &cmd) { return cmd->get_name() == tcmd; });
+        auto it = std::ranges::find_if(cmd_vector_, [&](const std::unique_ptr<CommandBase> &cmd) {
+            return cmd->get_name() == tcmd;
+        });
         if (it == cmd_vector_.end()) {
             throw NotExist("unknown command `" + std::string{tcmd} + "`");
         }

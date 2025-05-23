@@ -14,16 +14,17 @@
 #include <stdexcept>
 #include <string>
 
-#include "fmt/core.h"
-
 #define JLGXY_FMT_COMPILE 0
 
 #if JLGXY_FMT_COMPILE
+#define FMT_ENFORCE_COMPILE_STRING 1
 #include "fmt/compile.h"
 #define JLGXY_FMT FMT_COMPILE
 #else
 #define JLGXY_FMT FMT_STRING
 #endif
+
+#include "fmt/core.h"
 
 namespace jlgxy::jl {
 

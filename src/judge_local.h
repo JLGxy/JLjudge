@@ -287,7 +287,6 @@ struct row {
     const user_res_t *res;
     const std::string *name;
     double score;
-    bool operator<(const row &o) const { return score > o.score; }
 };
 
 inline std::string rand_by(const std::string_view s, const std::string_view t) {

@@ -104,6 +104,7 @@ std::string verdict_to_str_short(verdict_t ver) {
     }
 }
 
+using namespace std::literals;
 using tm_usage_t = long;
 using mem_usage_t = long;
 
@@ -174,7 +175,7 @@ void SubtaskDependencies::get_order() {
             }
         }
     }
-    for (auto &sp : tj.scc_) std::sort(sp.begin(), sp.end());
+    for (auto &sp : tj.scc_) std::ranges::sort(sp);
     auto comp_scc = [&](int a, int b) { return tj.scc_[a].front() > tj.scc_[b].front(); };
     std::priority_queue<int, std::vector<int>, std::function<bool(int, int)>> que(comp_scc);
     for (std::size_t i = 0; i < tj.cols(); i++) {
@@ -215,8 +216,7 @@ bool conf_t::is_valid() const {
     if (!is_valid_token(input_file)) return false;
     if (!is_valid_token(output_file)) return false;
     if (!is_valid_token(checker)) return false;
-    return std::all_of(testcase_conf.begin(), testcase_conf.end(),
-                       [](const auto &c) { return c.is_valid(); });
+    return std::ranges::all_of(testcase_conf, &testcase_conf_t::is_valid);
 }
 
 std::string scores_t::to_str() const {
@@ -256,9 +256,8 @@ scores_t list_result_t::calc_score(const conf_t &conf) const {
     boost::dynamic_bitset<> sub_passed, pre_passed;
     sub_passed.reserve(sub_num);
     for (const auto &subtask : conf.subtask_conf) {
-        sub_passed.push_back(
-                std::all_of(subtask.testcases.begin(), subtask.testcases.end(),
-                            [&](int tc) { return results[tc].res == verdict_t::_ac; }));
+        sub_passed.push_back(std::ranges::all_of(
+                subtask.testcases, [&](int tc) { return results[tc].res == verdict_t::_ac; }));
     }
     pre_passed.reserve(sub_num);
     for (std::size_t i = 0; i < sub_num; i++) {
@@ -450,18 +449,18 @@ bool Compiler::is_gcc_or_clang() const {
 void Compiler::compile(const fs::path &source, const fs::path &dest,
                        const std::vector<std::string> &additional_args) const {
     auto rarg = argvec;
-    std::replace(rarg.begin(), rarg.end(), std::string("${source}"), source.string());
-    std::replace(rarg.begin(), rarg.end(), std::string("${executable}"), dest.string());
+    std::ranges::replace(rarg, "${source}"sv, source.string());
+    std::ranges::replace(rarg, "${executable}"sv, dest.string());
 
-    std::copy(additional_args.begin(), additional_args.end(), std::back_inserter(rarg));
+    std::ranges::copy(additional_args, std::back_inserter(rarg));
 
     exec_vec(compiler, rarg);
 }
 
 bool Compiler::validfile(const fs::path &pth) const {
     std::string filename = pth.filename();
-    return std::any_of(suffix.begin(), suffix.end(),
-                       [&](const std::string &suf) { return endswith(filename, suf); });
+    return std::ranges::any_of(suffix,
+                               [&](const std::string &suf) { return filename.ends_with(suf); });
 }
 
 void ProgramWrapper::signal_handler(int) {
@@ -574,8 +573,8 @@ void ProgramWrapper::configure_seccomp() {
     jl::prog.println(JLGXY_FMT("size: {}"), filt.size());
 
     struct sock_fprog prog = {
-            static_cast<unsigned short>(filt.size()),
-            filt.data(),
+            .len = static_cast<unsigned short>(filt.size()),
+            .filter = filt.data(),
     };
 
     jl::prog.println(JLGXY_FMT("configuring seccomp"));
@@ -638,18 +637,16 @@ bool Tracer::is_dangerous_syscall(long id, pid_t pid) {
             ptrace(PTRACE_GETREGS, pid, nullptr, &regs);
             if (static_cast<int>(regs.rdi) != AT_FDCWD) return true;
             std::string filename = getdata(pid, regs.rsi);
-            while (filename.length() > 2 && startswith(filename, "./")) {
+            while (filename.length() > 2 && filename.starts_with("./")) {
                 filename.erase(filename.begin(), filename.begin() + 2);
             }
             // jl::p.println(JLGXY_FMT(<< filename));
             if ((regs.rdx & 3) == O_RDONLY) {
-                if (find(validinputs_p_->begin(), validinputs_p_->end(), filename) ==
-                            validinputs_p_->end() &&
-                    startswith(filename, "/etc/") && startswith(filename, "/lib/"))
+                if (std::ranges::find(*validinputs_p_, filename) == validinputs_p_->end() &&
+                    !filename.starts_with("/etc/") && !filename.starts_with("/lib/"))
                     return true;
             } else if ((regs.rdx & 3) == O_WRONLY) {
-                if (find(validoutputs_p_->begin(), validoutputs_p_->end(), filename) ==
-                    validoutputs_p_->end())
+                if (std::ranges::find(*validoutputs_p_, filename) == validoutputs_p_->end())
                     return true;
             } else {
                 return true;
@@ -930,16 +927,14 @@ verdict_t compile_to(const fs::path &src, const fs::path &exe, const Compiler &c
 
 std::pair<bool, const Compiler *> find_compiler_by_file(const std::vector<const Compiler *> &comps,
                                                         const fs::path &file) {
-    auto it = std::find_if(comps.begin(), comps.end(),
-                           [&](const Compiler *compc) { return compc->validfile(file); });
+    auto it = std::ranges::find_if(comps, [&](const Compiler *cp) { return cp->validfile(file); });
     if (it == comps.end()) return {false, nullptr};
     return std::make_pair(true, *it);
 }
 
 std::pair<bool, const Compiler *> find_compiler_by_name(const std::vector<const Compiler *> &comps,
                                                         const std::string_view name) {
-    auto it = std::find_if(comps.begin(), comps.end(),
-                           [&](const Compiler *compc) { return compc->name == name; });
+    auto it = std::ranges::find_if(comps, [&](const Compiler *cp) { return cp->name == name; });
     if (it == comps.end()) return {false, nullptr};
     return std::make_pair(true, *it);
 }
@@ -1098,7 +1093,10 @@ list_result_t Judger::run_all_ordered(int /* tot_pt */, const fs::path &source, 
             if (ans.results[pt].res == verdict_t::_wt) ans.results[pt] = run(pt);
             if (ans.results[pt].res != verdict_t::_ac) sub_pass = false;
             min_score = std::min(min_score, ans.results[pt].score);
-            if (sub_conf.scoring == scoring_t::_c_min && !sub_pass && min_score <= 0) break;
+            if (!sub_pass) {
+                if (sub_conf.scoring == scoring_t::_c_min && min_score <= 0) break;
+                if (sub_conf.scoring == scoring_t::_c_max && min_score >= 1) break;
+            }
         }
         if (!sub_pass) subtask_failed.set(sub);
     }

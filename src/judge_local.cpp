@@ -24,12 +24,9 @@
 #include <string_view>
 #include <thread>
 #include <tuple>
-#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
-
-#define FMT_ENFORCE_COMPILE_STRING 1
 
 #include "config.h"
 #include "fmt/core.h"
@@ -548,7 +545,6 @@ void JudgeAll::load_compilers() {
     std::ifstream conf_stream(conf_file);
     YAML::Node node = YAML::Load(conf_stream);
 
-    node.begin();
     for (auto curnode : node["compilers"]) {
         std::unique_ptr<Compiler> compp(std::make_unique<Compiler>());
         compp->name = (curnode["name"]).as<std::string>();
@@ -640,15 +636,12 @@ void JudgeAll::judge_main() {
 
 void JudgeAll::merge_user() {
     if (all_res.r.empty()) return;
-    sort(all_res.r.begin(), all_res.r.end(),
-         [](const std::pair<std::string, user_res_t> &a,
-            const std::pair<std::string, user_res_t> &b) { return a.first < b.first; });
+    std::ranges::sort(all_res.r, std::ranges::less{}, &std::pair<std::string, user_res_t>::first);
     std::size_t lst = 0;
     for (std::size_t i = 1; i < all_res.r.size(); i++) {
         if (all_res.r[i].first == all_res.r[lst].first) {
-            std::copy(std::make_move_iterator(all_res.r[i].second.subs.begin()),
-                      std::make_move_iterator(all_res.r[i].second.subs.end()),
-                      std::back_inserter(all_res.r[lst].second.subs));
+            std::ranges::move(all_res.r[i].second.subs,
+                              std::back_inserter(all_res.r[lst].second.subs));
         } else {
             ++lst;
             if (lst != i) all_res.r[lst] = std::move(all_res.r[i]);
@@ -660,10 +653,8 @@ void JudgeAll::merge_user() {
 void JudgeAll::remove_range() {
     for (auto &[user_name, user_res] : all_res.r) {
         const auto &un = user_name;
-        auto it =
-                std::remove_if(user_res.subs.begin(), user_res.subs.end(),
-                               [&](const sub_info_t &s) { return subs.contains(un, s.prob_name); });
-        user_res.subs.erase(it, user_res.subs.end());
+        erase_if(user_res.subs,
+                 [&](const sub_info_t &s) { return subs.contains(un, s.prob_name); });
     }
 }
 
@@ -704,11 +695,9 @@ void JudgeAll::export_results() {
     // auto table = to_table(all_res, probs);
     // generateexcel(table, start_time, start_running, end_time);
     for (auto &[user_name, user_res] : all_res.r) {
-        sort(user_res.subs.begin(), user_res.subs.end(),
-             [&](const sub_info_t &a, const sub_info_t &b) {
-                 return contest_config.prob_id.at(a.prob_name) <
-                        contest_config.prob_id.at(b.prob_name);
-             });
+        std::ranges::sort(user_res.subs, std::ranges::less{}, [&](const sub_info_t &a) {
+            return contest_config.prob_id.at(a.prob_name);
+        });
     }
     time_t now_c = time(nullptr);
     auto result_name = "result" + localstr(now_c, "-%Y%m%d-%H%M%S") + ".html";
@@ -741,10 +730,8 @@ prob_sub_vec JudgeAll::get_all_subs() const {
 
 prob_sub_vec JudgeAll::filter_sub(prob_sub_vec &&subs,
                                   const std::function<bool(const sub_info_t &s)> &pred) {
-    std::for_each(subs.begin(), subs.end(), [&pred](std::vector<const sub_info_t *> &v) {
-        auto it = std::remove_if(v.begin(), v.end(),
-                                 [&pred](const sub_info_t *s) { return !pred(*s); });
-        v.erase(it, v.end());
+    std::ranges::for_each(subs, [&pred](std::vector<const sub_info_t *> &v) {
+        erase_if(v, [&pred](const sub_info_t *s) { return !pred(*s); });
     });
     return subs;
 }
@@ -755,8 +742,7 @@ std::string JudgeAll::generate_bests(std::size_t best_cnt) const {
 
     std::string html = std::string(_stat_template_begin);
     for (std::size_t i = 0; i < prob_num; i++) {
-        std::sort(ac_subs[i].begin(), ac_subs[i].end(),
-                  iter_comp_iter<sub_info_t::comp_max_tm_usage>{});
+        std::ranges::sort(ac_subs[i], iter_comp_iter<sub_info_t::comp_max_tm_usage>{});
         if (ac_subs[i].size() > best_cnt) ac_subs[i].resize(best_cnt);
         html.append(_stat_template_problem_head);
         for (const auto *sub : ac_subs[i]) {
@@ -800,8 +786,8 @@ void JudgeAll::export_stats(std::size_t best_cnt) const {
     auto prob_num = contest_config.prob_id.size();
     std::vector<double> score_mean(prob_num), score_sd(prob_num);
     for (std::size_t i = 0; i < prob_num; i++) {
-        std::sort(tms[i].begin(), tms[i].end());
-        std::sort(mems[i].begin(), mems[i].end());
+        std::ranges::sort(tms[i]);
+        std::ranges::sort(mems[i]);
         if (tms[i].size() > best_cnt) tms[i].resize(best_cnt);
         if (mems[i].size() > best_cnt) mems[i].resize(best_cnt);
         scores[i].resize(all_res.r.size(), 0.0);
@@ -830,8 +816,9 @@ std::tuple<bool, const Compiler *, fs::path> JudgeAll::find_code_at(const fs::pa
 namespace {
 template <typename T>
 void remove_duplicated(std::vector<T> &v) {
-    std::sort(v.begin(), v.end());
-    v.erase(std::unique(v.begin(), v.end()), v.end());
+    std::ranges::sort(v);
+    auto [fir, lst] = std::ranges::unique(v);
+    v.erase(fir, lst);
 }
 }  // namespace
 
@@ -889,8 +876,8 @@ void JudgeAll::read_config(const fs::path &conf_file, conf_t &conf) const {
             cur_conf.tot_score = cur_node["score"].as<double>();
             cur_conf.scoring = to_scoring_t(cur_node["scoring"].as<std::string>());
             const auto &&tc_nodes = cur_node["testcases"];
-            for (auto it = tc_nodes.begin(); it != tc_nodes.end(); ++it) {
-                cur_conf.testcases.emplace_back(it->as<int>() - 1);
+            for (const auto &tc : tc_nodes) {
+                cur_conf.testcases.emplace_back(tc.as<int>() - 1);
             }
             remove_duplicated(cur_conf.testcases);
             const auto &&pre_node = cur_node["pre"];
@@ -1108,9 +1095,9 @@ std::string JudgeAll::generate_ranklist() const {
             if (exist_prob(sub.prob_name)) tot_score += sub.result.sco.score;
         }
 
-        users.push_back(row{&user_res, &user_name, tot_score});
+        users.push_back(row{.res = &user_res, .name = &user_name, .score = tot_score});
     }
-    std::sort(users.begin(), users.end());
+    std::ranges::sort(users, std::ranges::greater{}, [](const row &r) { return r.score; });
 
     auto html =
             fmt::format(JLGXY_FMT("    <div style=\"width:{}em; margin-bottom:2em\">\n      <div "

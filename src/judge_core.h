@@ -71,13 +71,6 @@ using mem_usage_t = long;
 
 constexpr tm_usage_t _tm_usage_inf = std::numeric_limits<tm_usage_t>::max();
 
-inline bool startswith(const std::string_view a, const std::string_view b) {
-    return a.length() >= b.length() && a.substr(0, b.length()) == b;
-}
-inline bool endswith(const std::string_view a, const std::string_view b) {
-    return a.length() >= b.length() && a.substr(a.length() - b.length(), b.length()) == b;
-}
-
 constexpr int _int_nan = -0x7fffffff - 1;
 constexpr double _double_inf = 1e18;
 
