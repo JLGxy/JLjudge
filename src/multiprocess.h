@@ -4,8 +4,10 @@
 #include <unistd.h>
 
 #include <cassert>
+#include <concepts>
 #include <csignal>
 #include <cstdlib>
+#include <functional>
 #include <type_traits>
 #include <utility>
 
@@ -13,25 +15,29 @@ namespace jlgxy::multiproc {
 
 class Process {
   public:
+    Process() = default;
+    Process(Process &&o) noexcept
+            : pid_(std::exchange(o.pid_, 0)),
+              status_(std::exchange(o.status_, 0)),
+              alive_(std::exchange(o.alive_, false)),
+              fail_(std::exchange(o.fail_, false)) {}
     template <typename T, typename... Args>
+        requires(!std::same_as<Process, std::remove_cvref_t<T>>) && std::invocable<T, Args...>
     explicit Process(T &&f, Args &&...args) {
-        static_assert(std::is_invocable<typename std::decay<T>::type,
-                                        typename std::decay<Args>::type...>::value,
-                      "arguments must be invocable after conversion to rvalues");
-
         int pid = fork();
         if (pid == -1) {
             fail_ = true;
             return;
         }
         if (pid == 0) {
-            f(std::forward(args)...);
+            std::invoke(std::forward<T>(f), std::forward<Args...>(args)...);
             exit(0);
         } else {
             pid_ = pid;
             alive_ = true;
         }
     }
+    Process(const Process &) = delete;
     ~Process() { join(); }
 
     void join() {
@@ -94,6 +100,7 @@ class Process {
 };
 
 template <typename T, typename... Args>
+    requires std::invocable<T, Args...>
 pid_t start_process(T &&f, Args &&...args) {
     static_assert(std::is_invocable<typename std::decay<T>::type,
                                     typename std::decay<Args>::type...>::value,
@@ -101,7 +108,7 @@ pid_t start_process(T &&f, Args &&...args) {
     int pid = fork();
     if (pid == -1) return -1;
     if (pid == 0) {
-        f(std::forward(args)...);
+        std::invoke(std::forward<T>(f), std::forward<Args...>(args)...);
         exit(0);
     }
     return pid;

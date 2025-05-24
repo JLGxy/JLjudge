@@ -30,7 +30,6 @@ namespace jlgxy::jl {
 
 class FileLock {
   public:
-    template <typename... Args>
     explicit FileLock(int fd) : fd_(fd) {
         if (flock(fd_, LOCK_EX) == -1) {
             throw std::runtime_error(std::string{"failed to get lock "} + strerror(errno));
